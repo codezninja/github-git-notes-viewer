@@ -1,0 +1,14 @@
+docs/ghes-support-plan.md
+  h_af8cbfb5485e65 3-6,10-12,241,244,251-277,413-427,430-433,436-474
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.20",
+  "base_commit_sha": "a76a891a41a1bf1419ba8cdbc1e0b201cec2f654",
+  "prompts": {},
+  "humans": {
+    "h_af8cbfb5485e65": {
+      "author": "Ezbon Jacob <ezjacob@gmail.com>"
+    }
+  }
+}
