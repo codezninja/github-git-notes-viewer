@@ -1,8 +1,14 @@
 # Plan: GitHub Enterprise Server (GHES) support
 
-Status: **proposal — no code changed yet**
+Status: **implemented and verified end-to-end** — all five phases landed together in
+[#2](https://github.com/Trailblaze-work/github-git-notes-viewer/pull/2), and notes have been
+confirmed rendering on a real GHES instance and on github.com. Retained as the design record;
+§10 lists the narrower cases still unverified.
 Scope: add GHES as an *optional*, user-configured host alongside github.com, without
 regressing the current zero-config public-repo experience.
+
+> The code review in §1 and the design in §2 describe the state *before* this change and
+> the target it aimed at. Both are preserved as written; §3 records what actually shipped.
 
 ---
 
@@ -232,17 +238,43 @@ the popup offers to enable it.
 
 ## 3. Implementation plan
 
-### 3.0 Decision to make first
+### 3.0 Decision to make first — RESOLVED: Option A
 
 **Consolidate or keep two fetch implementations?**
-- *Option A (recommended)* — extract the REST ladder from `background.js` into
+- *Option A (chosen)* — extract the REST ladder from `background.js` into
   `lib/notes.js`, used by both the content script (tier 2 of §2.5) and background.
   Deletes the dead `FETCH_GIT_NOTE` path. Net LOC roughly flat, one code path to make
   host-aware.
 - *Option B* — leave `background.js` alone and duplicate the REST ladder in `content.js`.
   Faster to land, doubles the surface that has to be kept host-aware.
 
-Everything below assumes **A**.
+**Shipped as A.** `background.js` lost its duplicate REST implementation entirely, and both
+`FETCH_GIT_NOTE` and `GET_NOTE_REFS` were removed — they were unreachable before the change
+and stayed unused after it, since `content.js` calls `lib/notes.js` directly.
+
+One consequence worth noting: `GhnNotes.fetchGitNote` is now itself uncalled. It was kept
+as a coherent lib export (it composes `resolveNotePath` + `fetchBlobContent`) rather than
+wiring cruft, but it is dead code today.
+
+### 3.1 What actually shipped
+
+All five phases landed in a single commit rather than the 4–5 PRs anticipated in §8,
+because the phases were executed concurrently against the frozen `lib/` contracts.
+
+| Phase | Status | Notes |
+|---|---|---|
+| 1 Host abstraction | done | `lib/host.js`, `lib/storage.js`, `lib/notes.js` |
+| 2 Permissions/registration | done | `scripting` + `activeTab`; `activeTab` was not in the original plan — the popup needs it to read the active tab's origin |
+| 3 GHES fetch paths | done | per-kind ladders + capability probe + REST fallback |
+| 4 UI | done | multi-host options page, active-tab-aware popup |
+| 5 Docs/packaging | done | `build-zip.sh` now asserts every declared file is in the zip |
+
+Exit criteria met by automated test: §4's unit and e2e plans, plus the anti-leak test.
+
+The Phase 3 and Phase 4 criteria both require a real GHES instance ("notes render on a real
+GHES commit page", "full add → grant → navigate loop"). **Both were confirmed manually against
+a live GHES instance, with github.com re-checked for regression.** The remaining gaps are
+configuration variants rather than the core paths — see §10.
 
 ### Phase 1 — Host abstraction, no behaviour change
 - Add `lib/host.js`: `deriveHost`, `normalizeHostInput`, `parseCommitPath`.
@@ -378,16 +410,65 @@ served from a different origin via a local https server) and assert:
 Phases 1–3 are independently shippable behind "no host added yet" (dead code until Phase 4
 exposes the UI), so this can land as 4–5 reviewable PRs rather than one.
 
+**Actual:** 21 files, +3752 / −465, landed as one PR. The estimate of ~950 LOC undershot by
+roughly 4×. Two things the estimate omitted account for most of the gap:
+
+| Area | Insertions | vs. estimate |
+|---|---|---|
+| Tests (`unit.mjs` 397, `e2e.mjs` 243, `mock-ghes-commit.html` 321) | 961 | not estimated at all |
+| Options + popup (`.js`/`.css`/`.html`) | 1045 | est. ~250 |
+
+```sh
+# insertions per file for this change
+git show --numstat HEAD -- test/unit.mjs test/e2e.mjs test/mock-ghes-commit.html
+git show --numstat HEAD -- options.js options.css options.html popup.js popup.css popup.html \
+  | awk '{s+=$1} END {print s}'
+```
+
 ---
 
-## 9. Open questions for you
+## 9. Open questions — as resolved during implementation
+
+These were answered by implementation choice, not by an explicit decision from the repo
+owner. Any of them can still be revisited.
 
 1. **Consolidate the duplicate fetch logic (§3.0 Option A) or keep `background.js` as-is?**
-2. **Minimum GHES version to support?** Supporting n-2 is what forces the REST tree
-   fallback; if latest-only is acceptable, Phase 3 shrinks noticeably.
-3. **Is `https://*/*` optional-permission store friction acceptable?** The alternative is
-   shipping a build with the enterprise hostname compiled into `content_scripts.matches`
-   (an internal-only sideloaded/enterprise-policy build), which avoids review entirely but
-   isn't publishable.
-4. **Do you need `ghe.coxautoinc.com` specifically validated in the manual matrix**, or
-   should the plan stay vendor-neutral?
+   → **Consolidated (Option A).** See §3.0.
+2. **Minimum GHES version to support?**
+   → **n-2 assumed.** The capability probe plus REST `git/trees` fallback (§2.5) was built,
+   so releases without the internal `/tree/` JSON payload still work. If latest-only were
+   acceptable, tier 2 of `fetchNotesTreeEntries` and the `capabilities` storage key could
+   both be deleted.
+3. **Is `https://*/*` optional-permission store friction acceptable?**
+   → **Assumed yes.** Declared as an optional permission only; the extension requests a
+   single concrete origin at a time and never the wildcard. Justification text is in §7.
+   Not yet tested against store review.
+4. **Do you need `ghe.coxautoinc.com` specifically validated in the manual matrix?**
+   → **Kept vendor-neutral.** No CAI-specific host appears anywhere in the code, tests, or
+   docs.
+
+---
+
+## 10. Still open after implementation
+
+The core add-host → grant → render flow is confirmed working on a live GHES instance and on
+github.com. What remains is narrower:
+
+1. **Only one GHES configuration was exercised.** The §4 matrix also lists a release without
+   the tree JSON endpoint (exercising the REST `git/trees` fallback), subdomain isolation in
+   both states, and the token-only path with no browser session. Those rows are still open.
+   The instance version and isolation mode used for the successful test were not recorded —
+   worth capturing here so the coverage claim is specific.
+2. **`optional_permissions: ["https://*/*"]` console behaviour in Chrome.** The extension
+   loads and works, so this is not a blocker. But Chrome MV3 expects API permissions in
+   `optional_permissions` rather than host patterns (`optional_host_permissions` is the
+   Chrome key; both are declared for cross-browser support), so Chrome may still be logging
+   a benign manifest warning. Worth a glance at the extensions page before store submission.
+3. **Store review has not been attempted** — the `https://*/*` justification in §7 is
+   untested against an actual reviewer.
+4. **`GhnNotes.fetchGitNote` is dead code** (see §3.0).
+5. **Pre-existing, out of scope:** `README.md`'s Configuration section advertises
+   "Additional note refs", but no options UI has ever existed for it, so the stored value is
+   permanently `[]`. `getNoteRefs`/`setNoteRefs` are wired in `lib/storage.js` and consumed
+   by `content.js`, so this needs either a small input in the options page or the bullet
+   removed.
