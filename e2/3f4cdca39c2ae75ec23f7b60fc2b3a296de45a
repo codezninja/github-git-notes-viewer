@@ -1,0 +1,79 @@
+docs/ghes-support-plan.md
+  s_e4c7165c462ebd::t_5dbbb1673036e3 1-393
+PRIVACY.md
+  s_a7f6c0864ecac6::t_b44b124ef8e5a1 3,7,11,13-17,26,29-32,35-40
+content.js
+  s_41d8a1c77829fd::t_d71c10e9717fd5 3-26,31-36,40-44,46-47,103,105-108,110,112,114-115,118,120-121,123-125,127-137,139-148,157-199,201-204,208-223,227-229,231-236,239-244,246-248,252-304,306-307,310-311,313-324,327,329-330,333-340,343,345,349-350,557,566-584,621-623,648,650
+manifest.json
+  s_a7f6c0864ecac6::t_1f94b5f00b94b0 4,15,17,21-22,25,30-37
+options.css
+  s_dce7e9f64ba9ad::t_f0912d86d93d1a 15,121-140,165-315
+options.html
+  s_dce7e9f64ba9ad::t_ff5453356ccf7b 13,15-18,20-23,25-38,45-46,49,54
+options.js
+  s_dce7e9f64ba9ad::t_f4c659612314ce 3-10,14-34,36-37,39-42,44-137,139-154,157-282,284-286,288-334,336-338,340-376,378-382,385-386,388-397,400-406,409-410,418-421
+package-lock.json
+  s_41d8a1c77829fd::t_4cfd2196b87402 10
+popup.css
+  s_b64cb276584c14::t_b9815fa80f858f 12,25-38,45-80,97-101,105-110,113-118,120-144,146-152,167,170-184
+popup.html
+  s_b64cb276584c14::t_d7b2027f4645ac 11-29,32
+popup.js
+  s_b64cb276584c14::t_30d5adba093f17 3-13,15-151,153-155,158-317,319-324,327,332
+scripts/build-zip.sh
+  s_a7f6c0864ecac6::t_f0baa9ed8d9736 43-45,57-75
+test/e2e.mjs
+  s_a7f6c0864ecac6::t_a0a3b2bb8ecc77 5,11,300-327,329-363,746-923
+test/mock-ghes-commit.html
+  s_a7f6c0864ecac6::t_d385f53adc4de2 1-321
+test/unit.mjs
+  s_41d8a1c77829fd::t_7f07b92416d25e 4,10,449-843
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.20",
+  "base_commit_sha": "e23f4cdca39c2ae75ec23f7b60fc2b3a296de45a",
+  "prompts": {},
+  "sessions": {
+    "s_41d8a1c77829fd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5ab0368c-bf03-4381-830c-5809db171515",
+        "model": "unknown"
+      },
+      "human_author": "Ezbon Jacob <ezjacob@gmail.com>"
+    },
+    "s_a7f6c0864ecac6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5812c2e1-d66b-4b78-a390-617a127045fd",
+        "model": "unknown"
+      },
+      "human_author": "Ezbon Jacob <ezjacob@gmail.com>"
+    },
+    "s_b64cb276584c14": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2435d40a-69cf-41aa-9771-b36b8b2970ea",
+        "model": "unknown"
+      },
+      "human_author": "Ezbon Jacob <ezjacob@gmail.com>"
+    },
+    "s_dce7e9f64ba9ad": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2e064903-52aa-4398-b7fc-fac153f781d7",
+        "model": "unknown"
+      },
+      "human_author": "Ezbon Jacob <ezjacob@gmail.com>"
+    },
+    "s_e4c7165c462ebd": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "019fcbe1-9ec0-7baf-9958-6f07bff872d2",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ezbon Jacob <ezjacob@gmail.com>"
+    }
+  }
+}
