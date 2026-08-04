@@ -1,0 +1,8 @@
+model: claude-opus-5
+provider: anthropic
+agent: pi-coding-agent
+session: 019fcbe1-9ec0-7baf-9958-6f07bff872d2
+authored-by: AI assistant, reviewed by Ezbon Jacob
+scope: GHES host support — lib/host.js, lib/storage.js, lib/notes.js, background.js, content.js, options, popup, tests, docs
+method: shared lib contracts authored first, then five concurrent subagents on disjoint file sets
+verification: 90 unit + 29 e2e tests, plus manual check on a live GHES instance and github.com
