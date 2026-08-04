@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "GitHub Git Notes Viewer",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Display git notes inline on GitHub commit pages.",
   "browser_specific_settings": {
     "gecko": {
@@ -12,19 +12,29 @@
       }
     }
   },
-  "permissions": ["storage"],
+  "permissions": ["storage", "scripting", "activeTab"],
   "host_permissions": [
+    "https://github.com/*",
     "https://raw.githubusercontent.com/*",
     "https://api.github.com/*"
   ],
+  "optional_host_permissions": ["https://*/*"],
+  "optional_permissions": ["https://*/*"],
   "background": {
     "service_worker": "background.js",
-    "scripts": ["background.js"]
+    "scripts": ["lib/host.js", "lib/storage.js", "lib/notes.js", "background.js"]
   },
   "content_scripts": [
     {
       "matches": ["https://github.com/*/*/commit/*"],
-      "js": ["lib/purify.min.js", "lib/marked.min.js", "content.js"],
+      "js": [
+        "lib/purify.min.js",
+        "lib/marked.min.js",
+        "lib/host.js",
+        "lib/storage.js",
+        "lib/notes.js",
+        "content.js"
+      ],
       "css": ["content.css"],
       "run_at": "document_idle"
     }

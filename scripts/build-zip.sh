@@ -40,6 +40,9 @@ EXTENSION_FILES=(
   options.html
   options.js
   options.css
+  lib/host.js
+  lib/storage.js
+  lib/notes.js
   lib/purify.min.js
   lib/marked.min.js
   icons/icon-16.png
@@ -51,3 +54,22 @@ zip -r9 "$DIST/extension.zip" "${EXTENSION_FILES[@]}"
 
 echo "Built $DIST/extension.zip"
 ls -lh "$DIST/extension.zip"
+
+# Verify every declared file made it into the zip. The list is explicit (not a
+# glob), so a forgotten entry is a silent broken build otherwise.
+echo "Verifying zip contents..."
+ZIP_LIST="$(unzip -l "$DIST/extension.zip" | awk 'NR>3 {print $NF}')"
+MISSING=()
+for f in "${EXTENSION_FILES[@]}"; do
+  if ! printf '%s\n' "$ZIP_LIST" | grep -qxF "$f"; then
+    MISSING+=("$f")
+  fi
+done
+
+if [ "${#MISSING[@]}" -ne 0 ]; then
+  echo "ERROR: the following declared EXTENSION_FILES are missing from $DIST/extension.zip:" >&2
+  printf '  - %s\n' "${MISSING[@]}" >&2
+  exit 1
+fi
+
+echo "All ${#EXTENSION_FILES[@]} declared files present in zip."

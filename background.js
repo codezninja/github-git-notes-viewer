@@ -1,238 +1,316 @@
 if (typeof browser === "undefined") globalThis.browser = chrome;
 
-// In-memory cache: key = "owner/repo:ref" → { tree: Map<commitSha, blobSha>, ts: number }
-const treeCache = new Map();
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
-
-function isCacheValid(entry) {
-  return entry && Date.now() - entry.ts < CACHE_TTL;
+// Chrome MV3 loads this as a service worker (importScripts); Firefox loads it via
+// background.scripts, which already pulls the libs in as separate <script>s.
+if (typeof importScripts === "function" && typeof globalThis.GhnHost === "undefined") {
+  importScripts("lib/host.js", "lib/storage.js", "lib/notes.js");
 }
+const H = globalThis.GhnHost;
+const S = globalThis.GhnStorage;
+const N = globalThis.GhnNotes;
 
-async function githubApi(path, token) {
-  const res = await fetch(`https://api.github.com${path}`, {
-    headers: {
-      Accept: "application/vnd.github+json",
-      Authorization: `Bearer ${token}`,
-      "X-GitHub-Api-Version": "2022-11-28",
-    },
+// Files a per-host content script needs, in load order. Static github.com registration
+// in the manifest uses the same list.
+const CONTENT_SCRIPT_FILES = [
+  "lib/purify.min.js",
+  "lib/marked.min.js",
+  "lib/host.js",
+  "lib/storage.js",
+  "lib/notes.js",
+  "content.js",
+];
+const CONTENT_SCRIPT_CSS = ["content.css"];
+
+// --- lifecycle --------------------------------------------------------------
+
+browser.runtime.onInstalled.addListener(() => {
+  S.ensureMigrated().catch((err) => console.error("[ghn] migration failed", err));
+  reconcileHosts().catch((err) => console.error("[ghn] reconcile failed", err));
+});
+
+browser.runtime.onStartup.addListener(() => {
+  S.ensureMigrated().catch((err) => console.error("[ghn] migration failed", err));
+  reconcileHosts().catch((err) => console.error("[ghn] reconcile failed", err));
+});
+
+// Users can revoke a host permission from the browser UI at any time; keep the storage
+// entry so re-granting later restores their token, but drop the content script.
+if (browser.permissions?.onRemoved?.addListener) {
+  browser.permissions.onRemoved.addListener((perms) => {
+    for (const origin of extractOrigins(perms)) {
+      unregisterHost(origin).catch((err) =>
+        console.warn("[ghn] unregister after permission removal failed", err)
+      );
+    }
   });
-
-  if (res.status === 401) {
-    throw { status: 401, message: "Invalid or expired token" };
-  }
-  if (res.status === 403) {
-    const remaining = res.headers.get("x-ratelimit-remaining");
-    if (remaining === "0") {
-      const reset = res.headers.get("x-ratelimit-reset");
-      const resetDate = reset ? new Date(Number(reset) * 1000) : null;
-      throw {
-        status: 403,
-        message: `Rate limit exceeded${resetDate ? `. Resets at ${resetDate.toLocaleTimeString()}` : ""}`,
-      };
+}
+if (browser.permissions?.onAdded?.addListener) {
+  browser.permissions.onAdded.addListener((perms) => {
+    for (const origin of extractOrigins(perms)) {
+      registerHost(origin).catch((err) =>
+        console.warn("[ghn] register after permission grant failed", err)
+      );
     }
-    throw { status: 403, message: "Forbidden" };
-  }
-  if (res.status === 404) {
-    throw { status: 404, message: "Not found" };
-  }
-  if (!res.ok) {
-    throw { status: res.status, message: `GitHub API error: ${res.status}` };
-  }
-
-  return res.json();
+  });
 }
 
-// Fetch the notes tree for a given repo and ref, with caching
-async function fetchNotesTree(owner, repo, noteRef, token) {
-  const cacheKey = `${owner}/${repo}:${noteRef}`;
-  const cached = treeCache.get(cacheKey);
-  if (isCacheValid(cached)) {
-    return cached.tree;
+function extractOrigins(perms) {
+  const out = [];
+  for (const pattern of (perms && perms.origins) || []) {
+    // pattern looks like "https://ghe.example.com/*"; strip the trailing "/*".
+    const match = String(pattern).match(/^(https:\/\/[^/]+)\/\*$/);
+    if (match && !H.isDotcomOrigin(match[1])) out.push(match[1]);
   }
-
-  // 1. Get the notes ref
-  const encodedRef = noteRef.replace(/\//g, "%2F");
-  const refData = await githubApi(
-    `/repos/${owner}/${repo}/git/ref/${encodedRef}`,
-    token
-  );
-  const commitSha = refData.object.sha;
-
-  // 2. Get the commit to find the tree
-  const commitData = await githubApi(
-    `/repos/${owner}/${repo}/git/commits/${commitSha}`,
-    token
-  );
-  const treeSha = commitData.tree.sha;
-
-  // 3. Get the tree entries
-  const treeData = await githubApi(
-    `/repos/${owner}/${repo}/git/trees/${treeSha}`,
-    token
-  );
-
-  // Build the lookup: commit SHA → { blobSha } or { subtreeSha, prefix }
-  const tree = new Map();
-  for (const entry of treeData.tree) {
-    if (entry.type === "blob") {
-      // Direct mapping: entry.path is the full commit SHA
-      tree.set(entry.path, { type: "blob", sha: entry.sha });
-    } else if (entry.type === "tree") {
-      // Fanout: entry.path is first 2 chars of commit SHA
-      tree.set(entry.path, { type: "tree", sha: entry.sha });
-    }
-  }
-
-  treeCache.set(cacheKey, { tree, ts: Date.now() });
-  return tree;
+  return out;
 }
 
-// Resolve a commit SHA to its note blob SHA, handling fanout
-async function resolveNoteBlob(owner, repo, noteRef, commitSha, token) {
-  const tree = await fetchNotesTree(owner, repo, noteRef, token);
+// --- dynamic content-script registration ------------------------------------
 
-  // Try direct lookup first (no fanout)
-  const direct = tree.get(commitSha);
-  if (direct && direct.type === "blob") {
-    return direct.sha;
+async function registerHost(origin) {
+  if (!browser.scripting?.registerContentScripts) {
+    console.warn("[ghn] browser.scripting.registerContentScripts unavailable");
+    return;
+  }
+  if (H.isDotcomOrigin(origin)) return; // static content script covers github.com
+
+  const id = H.contentScriptId(origin);
+  try {
+    await browser.scripting.registerContentScripts([
+      {
+        id,
+        matches: [H.commitMatchPattern(origin)],
+        js: CONTENT_SCRIPT_FILES,
+        css: CONTENT_SCRIPT_CSS,
+        runAt: "document_idle",
+        persistAcrossSessions: true,
+      },
+    ]);
+  } catch (err) {
+    const msg = (err && err.message) || String(err);
+    // Chrome: "Duplicate script ID '...'"; Firefox: "already registered".
+    if (/duplicate|already/i.test(msg)) return;
+    throw err;
+  }
+}
+
+async function unregisterHost(origin) {
+  if (!browser.scripting?.unregisterContentScripts) return;
+  if (H.isDotcomOrigin(origin)) return;
+
+  const id = H.contentScriptId(origin);
+  try {
+    await browser.scripting.unregisterContentScripts({ ids: [id] });
+  } catch (err) {
+    const msg = (err && err.message) || String(err);
+    if (/does not exist|nonexistent|not found/i.test(msg)) return;
+    throw err;
+  }
+}
+
+// Bring registered scripts back in sync with stored+granted hosts. User revocations from
+// the browser UI, uninstalled hosts left behind by a crash, etc. all get repaired here.
+async function reconcileHosts() {
+  if (!browser.scripting?.getRegisteredContentScripts) {
+    console.warn("[ghn] browser.scripting.getRegisteredContentScripts unavailable");
+    return;
   }
 
-  // Try fanout: first 2 chars → subtree, remaining 38 chars → blob
-  const prefix = commitSha.slice(0, 2);
-  const suffix = commitSha.slice(2);
-  const subtreeEntry = tree.get(prefix);
-  if (!subtreeEntry || subtreeEntry.type !== "tree") {
-    return null; // No note for this commit
-  }
-
-  // Fetch the subtree
-  const subtreeData = await githubApi(
-    `/repos/${owner}/${repo}/git/trees/${subtreeEntry.sha}`,
-    token
-  );
-  for (const entry of subtreeData.tree) {
-    if (entry.path === suffix && entry.type === "blob") {
-      return entry.sha;
+  const stored = await S.listHosts();
+  const granted = new Set();
+  for (const entry of stored) {
+    if (entry.kind === "dotcom") continue;
+    try {
+      const has = await browser.permissions.contains({
+        origins: [H.hostPermissionPattern(entry.origin)],
+      });
+      if (has) granted.add(entry.origin);
+    } catch (err) {
+      console.warn("[ghn] permissions.contains failed for", entry.origin, err);
     }
   }
 
-  return null;
-}
-
-// Fetch and decode a blob's content
-async function fetchBlobContent(owner, repo, blobSha, token) {
-  const blobData = await githubApi(
-    `/repos/${owner}/${repo}/git/blobs/${blobSha}`,
-    token
+  const registered = await browser.scripting.getRegisteredContentScripts();
+  const registeredIds = new Set(
+    registered.filter((s) => s.id && s.id.startsWith("ghn-")).map((s) => s.id)
   );
-  if (blobData.encoding === "base64") {
-    return atob(blobData.content.replace(/\n/g, ""));
+
+  // Register anything missing.
+  for (const origin of granted) {
+    if (!registeredIds.has(H.contentScriptId(origin))) {
+      try {
+        await registerHost(origin);
+      } catch (err) {
+        console.warn("[ghn] register failed for", origin, err);
+      }
+    }
   }
-  return blobData.content;
+
+  // Unregister anything registered but no longer backed by a stored+granted host.
+  const wantedIds = new Set([...granted].map((o) => H.contentScriptId(o)));
+  for (const id of registeredIds) {
+    if (!wantedIds.has(id)) {
+      try {
+        await browser.scripting.unregisterContentScripts({ ids: [id] });
+      } catch (err) {
+        console.warn("[ghn] unregister stale script failed", id, err);
+      }
+    }
+  }
 }
 
-// Main handler: fetch git note for a specific commit
-async function fetchGitNote(owner, repo, commitSha, noteRef, token) {
-  const blobSha = await resolveNoteBlob(
-    owner,
-    repo,
-    noteRef,
-    commitSha,
-    token
-  );
-  if (!blobSha) {
-    return null;
-  }
-  const content = await fetchBlobContent(owner, repo, blobSha, token);
-  return content;
-}
+// --- message handlers -------------------------------------------------------
 
-// Get configured note refs, or default
-async function getNoteRefs() {
-  const { noteRefs } = await browser.storage.local.get("noteRefs");
-  if (noteRefs && noteRefs.length > 0) {
-    return noteRefs;
-  }
-  return ["refs/notes/commits"];
-}
-
-// Message handler
 browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message.type === "FETCH_GIT_NOTE") {
-    handleFetchGitNote(message).then(sendResponse);
-    return true; // async response
-  }
+  if (!message || typeof message.type !== "string") return;
 
-  if (message.type === "CHECK_AUTH") {
-    handleCheckAuth().then(sendResponse);
-    return true;
-  }
+  switch (message.type) {
+    case "CHECK_AUTH":
+      handleCheckAuth(message).then(sendResponse);
+      return true;
 
-  if (message.type === "CLEAR_CACHE") {
-    treeCache.clear();
-    sendResponse({ ok: true });
-    return false;
-  }
+    case "PROBE_HOST":
+      handleProbeHost(message).then(sendResponse);
+      return true;
 
-  if (message.type === "GET_NOTE_REFS") {
-    getNoteRefs().then(sendResponse);
-    return true;
-  }
+    case "LIST_HOSTS":
+      handleListHosts().then(sendResponse);
+      return true;
 
-  if (message.type === "OPEN_OPTIONS") {
-    browser.runtime.openOptionsPage();
-    return false;
+    case "ADD_HOST":
+      handleAddHost(message).then(sendResponse);
+      return true;
+
+    case "REMOVE_HOST":
+      handleRemoveHost(message).then(sendResponse);
+      return true;
+
+    case "SET_TOKEN":
+      handleSetToken(message).then(sendResponse);
+      return true;
+
+    case "CLEAR_CACHE":
+      handleClearCache().then(sendResponse);
+      return true;
+
+    case "OPEN_OPTIONS":
+      browser.runtime.openOptionsPage();
+      return; // no response
+
+    default:
+      return; // unknown type — ignore
   }
 });
 
-async function handleFetchGitNote({ owner, repo, commitSha }) {
-  const { githubToken } = await browser.storage.local.get("githubToken");
-  if (!githubToken) {
-    return { error: "no_token", message: "No GitHub token configured" };
+async function handleCheckAuth({ origin }) {
+  const targetOrigin = origin || H.DOTCOM_ORIGIN;
+  let host;
+  try {
+    host = H.deriveHost(targetOrigin);
+  } catch (err) {
+    return { authenticated: false, error: (err && err.message) || "Invalid host" };
   }
 
-  const noteRefs = await getNoteRefs();
-  const results = [];
-
-  for (const ref of noteRefs) {
-    try {
-      const content = await fetchGitNote(
-        owner,
-        repo,
-        commitSha,
-        ref,
-        githubToken
-      );
-      if (content !== null) {
-        results.push({ ref, content });
-      }
-    } catch (err) {
-      if (err.status === 404) {
-        // No notes ref in this repo — skip silently
-        continue;
-      }
-      if (err.status === 401) {
-        return { error: "auth_error", message: err.message };
-      }
-      if (err.status === 403) {
-        return { error: "rate_limit", message: err.message };
-      }
-      return { error: "api_error", message: err.message };
-    }
+  const token = await S.getToken(host.origin);
+  try {
+    const { username } = await N.checkAuth(host, token);
+    return { authenticated: true, username, usedCookie: !token };
+  } catch (err) {
+    return { authenticated: false, error: (err && err.message) || "Auth failed" };
   }
-
-  return { notes: results };
 }
 
-async function handleCheckAuth() {
-  const { githubToken } = await browser.storage.local.get("githubToken");
-  if (!githubToken) {
-    return { authenticated: false };
+async function handleProbeHost({ origin }) {
+  const normalized = H.normalizeHostInput(origin);
+  if (!normalized.ok) return { ok: false, error: normalized.error };
+  const host = H.deriveHost(normalized.origin);
+  return N.probeHost(host);
+}
+
+async function handleListHosts() {
+  const hosts = await S.listHosts();
+  const out = [];
+  for (const h of hosts) {
+    let granted = h.kind === "dotcom";
+    if (!granted) {
+      try {
+        granted = await browser.permissions.contains({
+          origins: [H.hostPermissionPattern(h.origin)],
+        });
+      } catch {
+        granted = false;
+      }
+    }
+    out.push({ ...h, granted });
   }
+  return { hosts: out };
+}
+
+async function handleAddHost({ origin }) {
+  const normalized = H.normalizeHostInput(origin);
+  if (!normalized.ok) return { ok: false, error: normalized.error };
+
+  // permissions.request() cannot run from a service worker — the options page must have
+  // already prompted the user. We only accept origins that are already granted.
+  let has = false;
   try {
-    const user = await githubApi("/user", githubToken);
-    return { authenticated: true, username: user.login };
+    has = await browser.permissions.contains({
+      origins: [H.hostPermissionPattern(normalized.origin)],
+    });
   } catch (err) {
-    return { authenticated: false, error: err.message };
+    return { ok: false, error: (err && err.message) || "Permission check failed" };
   }
+  if (!has) {
+    return { ok: false, error: "Permission not granted for that host." };
+  }
+
+  const host = await S.addHost(normalized.origin);
+  try {
+    await registerHost(host.origin);
+  } catch (err) {
+    return { ok: false, error: `Registered host, but content-script setup failed: ${err && err.message}` };
+  }
+  return { ok: true, host };
+}
+
+async function handleRemoveHost({ origin }) {
+  let host;
+  try {
+    host = H.deriveHost(origin);
+  } catch (err) {
+    return { ok: false, error: (err && err.message) || "Invalid host" };
+  }
+  if (host.kind === "dotcom") {
+    return { ok: false, error: "github.com cannot be removed." };
+  }
+
+  try {
+    await unregisterHost(host.origin);
+  } catch (err) {
+    console.warn("[ghn] unregister failed during REMOVE_HOST", err);
+  }
+  await S.removeHost(host.origin);
+  try {
+    await browser.permissions.remove({
+      origins: [H.hostPermissionPattern(host.origin)],
+    });
+  } catch (err) {
+    console.warn("[ghn] permissions.remove failed", err);
+  }
+  return { ok: true };
+}
+
+async function handleSetToken({ origin, token }) {
+  const targetOrigin = origin || H.DOTCOM_ORIGIN;
+  try {
+    await S.setToken(targetOrigin, token || "");
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: (err && err.message) || "Failed to save token" };
+  }
+}
+
+async function handleClearCache() {
+  N.clearCache();
+  await S.clearCapabilities();
+  return { ok: true };
 }

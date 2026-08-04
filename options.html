@@ -10,45 +10,48 @@
       <h1>GitHub Git Notes Viewer</h1>
 
       <section>
-        <h2>GitHub Personal Access Token</h2>
+        <h2>Hosts</h2>
         <p class="hint">
-          Only needed for <strong>private repos</strong>. Public repos work without a token.<br>
-          Create a
-          <a
-            href="https://github.com/settings/personal-access-tokens/new"
-            target="_blank"
-            rel="noopener"
-            >fine-grained token</a
-          >
-          scoped to the repos you need, with <strong>Contents: Read-only</strong> permission.
+          Notes are read from each configured host. <strong>github.com</strong> is always
+          enabled. Add a GitHub Enterprise Server hostname below to enable notes on that
+          host too. A token is only needed for private repos; on Enterprise Server, your
+          browser session cookie is usually enough.
         </p>
-        <div class="field-row">
-          <input
-            type="password"
-            id="token"
-            placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
-            spellcheck="false"
-          />
-          <button id="toggle-visibility" title="Show/hide token">Show</button>
+
+        <div id="hosts-list" class="hosts-list" aria-live="polite"></div>
+        <div id="hosts-empty" class="hint" hidden>
+          Loading hosts… <button id="hosts-retry" class="link-button" type="button">Retry</button>
         </div>
-        <div class="button-row">
-          <button id="save-token" class="primary">Save Token</button>
-          <button id="validate-token">Validate</button>
+
+        <div class="add-host">
+          <label for="new-host" class="add-host-label">Add enterprise host</label>
+          <div class="field-row">
+            <input
+              type="text"
+              id="new-host"
+              placeholder="ghe.example.com"
+              spellcheck="false"
+              autocomplete="off"
+            />
+            <button id="add-host" class="primary" type="button">Add enterprise host</button>
+          </div>
+          <div id="add-host-status" class="status" hidden></div>
         </div>
-        <div id="token-status" class="status" hidden></div>
       </section>
 
       <section>
         <h2>Cache</h2>
         <p class="hint">
-          Notes trees are cached in memory for 5 minutes to reduce API calls.
+          Clears cached notes trees and host capability probes. Use this if a host's
+          capabilities have changed (for example, subdomain isolation was toggled).
         </p>
         <div class="button-row">
-          <button id="clear-cache">Clear Cache</button>
+          <button id="clear-cache" type="button">Clear Cache</button>
         </div>
         <div id="cache-status" class="status" hidden></div>
       </section>
     </div>
+    <script src="lib/host.js"></script>
     <script src="options.js"></script>
   </body>
 </html>

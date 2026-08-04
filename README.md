@@ -16,8 +16,9 @@ Git notes are a powerful but underused Git feature -- they let you attach metada
 
 ## Features
 
-- **Zero config for public repos** -- uses your GitHub session for note discovery, fetches content from `raw.githubusercontent.com`. Works out of the box.
-- **Private repo support** -- requires a GitHub fine-grained PAT with **Contents: Read-only** permission, scoped to the repos you need. GitHub doesn't expose raw note content for private repos through any cookie-authenticated endpoint.
+- **Zero config for public repos on github.com** -- uses your GitHub session for note discovery, fetches content from `raw.githubusercontent.com`. Works out of the box.
+- **Private repo support on github.com** -- requires a GitHub fine-grained PAT with **Contents: Read-only** permission, scoped to the repos you need. GitHub's `raw.githubusercontent.com` doesn't expose raw note content for private repos through any cookie-authenticated endpoint.
+- **GitHub Enterprise Server (GHES) support** -- add your enterprise host in the options page or via the popup on any GHES commit page. On GHES the API and raw content are same-origin with the commit page, so your normal browser session usually covers private repos with **no token needed**.
 - **Auto-discovery** -- automatically discovers all note refs in a repo via the GitHub API, plus tries common defaults (`refs/notes/commits`, `refs/notes/claude-prompt-trail`). No need to configure which refs to check.
 - **Auto format detection** -- detects Markdown, JSON, and YAML content and renders it appropriately
 - **Rich rendering** -- Markdown notes are rendered with full GFM support (tables, code blocks, lists, etc.) via [marked](https://github.com/markedjs/marked)
@@ -33,9 +34,30 @@ Git notes are a powerful but underused Git feature -- they let you attach metada
 2. **Chrome/Edge**: Go to `chrome://extensions`, enable "Developer mode", click "Load unpacked", select this directory
 3. **Firefox**: Go to `about:debugging#/runtime/this-firefox`, click "Load Temporary Add-on", select `manifest.json`
 
-The extension works immediately for **public repos** -- no token needed.
+The extension works immediately for **public repos on github.com** -- no token needed.
 
-For **private repos**, open the extension options and add a [fine-grained personal access token](https://github.com/settings/personal-access-tokens/new) scoped to the repos you need with **Contents: Read-only** permission.
+For **private repos on github.com**, open the extension options and add a [fine-grained personal access token](https://github.com/settings/personal-access-tokens/new) scoped to the repos you need with **Contents: Read-only** permission.
+
+## GitHub Enterprise Server
+
+The extension also works on self-hosted GitHub Enterprise Server (GHES). Because enterprise hostnames are unique per install and unknowable at publish time, you enable each host yourself.
+
+**Enable a host:**
+
+- Open the options page, enter your GHES hostname (e.g. `ghe.example.com`), and click *Add*, **or**
+- On any GHES commit page, click the extension icon and use *Enable this host*.
+
+Either path triggers a browser permission prompt for that single origin. That prompt is why the extension declares `https://*/*` as an *optional* host permission -- the wildcard is the allowed set the user can grant *from*, not something the extension asks for up front. Granted origins are listed in the options page and can be revoked there or in your browser's extension settings.
+
+**Tokens are usually not needed.** On GHES the API (`https://YOUR-GHES-HOST/api/v3`) and raw content (`https://YOUR-GHES-HOST/{owner}/{repo}/raw/...`) are same-origin with the commit page, so your existing signed-in browser session already covers private repos. This is a genuine advantage over github.com, where `raw.githubusercontent.com` won't accept your session cookie.
+
+**If you do need a token** (e.g. session-less use, or a token-only network policy), create a **classic PAT** with the `repo` scope at `https://YOUR-GHES-HOST/settings/tokens`. Fine-grained tokens aren't available on all GHES releases.
+
+**Subdomain isolation** is handled automatically. When your admin has enabled it, raw content 302s from `YOUR-HOST/{...}/raw/...` to `raw.YOUR-HOST/...`; the browser follows the redirect using the permission you granted.
+
+**Older GHES releases** may lack the internal `/tree/` JSON payload the extension uses on github.com for fast note discovery. When that endpoint is absent the extension automatically falls back to the REST `git/trees` API -- no configuration required.
+
+**Remove a host** by clicking the ✕ next to it in the options page. That unregisters the content script, deletes the stored token for that host, and revokes the browser permission.
 
 ## How It Works
 
@@ -67,7 +89,8 @@ All rendered HTML (from Markdown) is sanitized by **DOMPurify** with a strict al
 
 Open the extension options page to configure:
 
-- **GitHub PAT** -- required for private repos. Create a [fine-grained token](https://github.com/settings/personal-access-tokens/new) with **Contents: Read-only** permission. Not needed for public repos.
+- **Hosts** -- github.com is always enabled. Add GHES hosts here; each gets its own token slot.
+- **Per-host token** -- on github.com, a [fine-grained token](https://github.com/settings/personal-access-tokens/new) with **Contents: Read-only** permission for private repos. On GHES, a classic token with the `repo` scope, usually not needed if you're signed in.
 - **Additional note refs** -- extra refs to check beyond the auto-discovered ones and defaults (`refs/notes/commits`, `refs/notes/claude-prompt-trail`)
 - **Clear cache** -- flush the in-memory notes tree cache
 
@@ -75,7 +98,7 @@ Open the extension options page to configure:
 
 ```
 npm install
-npm test              # Run E2E tests
+npm test              # Run unit + E2E tests
 npm run screenshots   # Regenerate README screenshots
 ```
 
@@ -83,9 +106,12 @@ npm run screenshots   # Regenerate README screenshots
 
 ```
 ├── manifest.json       MV3 manifest (Chrome + Firefox)
-├── background.js       Service worker: GitHub API (PAT fallback), caching
-├── content.js          Content script: cookie-based fetch, format detection, rendering
+├── background.js       Service worker: host registration, messages, auth checks
+├── content.js          Content script: per-host fetch ladder, format detection, rendering
 ├── content.css         Styles matching GitHub's design language
+├── lib/host.js         Host abstraction (github.com vs GHES); all host URLs live here
+├── lib/storage.js      Per-host settings + tokens, schema migration
+├── lib/notes.js        Host-aware REST ladder for resolving notes
 ├── lib/                marked.min.js + purify.min.js (vendored)
 ├── popup.html/js/css   Toolbar popup: auth status, settings link
 ├── options.html/js/css Options page: PAT, note refs, cache

@@ -9,7 +9,7 @@ body {
   color: #e6edf3;
   margin: 0;
   padding: 0;
-  width: 300px;
+  width: 320px;
 }
 
 .popup {
@@ -22,12 +22,60 @@ h1 {
   margin: 0 0 12px 0;
 }
 
-.status-row {
+.context {
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  background: #161b22;
+}
+
+.context.warning {
+  border-color: #9e6a03;
+  background: #2d2205;
+}
+
+.context-header {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 10px;
   font-size: 13px;
+}
+
+.context-detail {
+  font-size: 12px;
+  color: #8b949e;
+  margin-top: 4px;
+  word-break: break-all;
+}
+
+.context-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.context-actions button {
+  width: auto;
+  flex: 1;
+}
+
+.context-actions button[hidden] {
+  display: none;
+}
+
+.context-message {
+  font-size: 12px;
+  color: #8b949e;
+  margin-top: 8px;
+}
+
+.context-message.error {
+  color: #f85149;
+}
+
+.context-message.success {
+  color: #3fb950;
 }
 
 .dot {
@@ -46,22 +94,62 @@ h1 {
   background: #f85149;
 }
 
-.refs-row {
-  font-size: 12px;
-  color: #8b949e;
+.dot.warning {
+  background: #d29922;
+}
+
+.hosts {
   margin-bottom: 12px;
 }
 
-.refs-label {
-  margin-right: 4px;
+.hosts-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #8b949e;
+  margin-bottom: 6px;
 }
 
-.refs-row code {
+.host-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid #30363d;
+  border-radius: 6px;
   background: #161b22;
-  padding: 2px 6px;
-  border-radius: 4px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.host-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  border-bottom: 1px solid #21262d;
+}
+
+.host-list li:last-child {
+  border-bottom: none;
+}
+
+.host-list .host-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.host-list .host-meta {
   font-size: 11px;
-  color: #e6edf3;
+  color: #8b949e;
+}
+
+.host-list .empty {
+  color: #8b949e;
+  padding: 8px 10px;
+  text-align: center;
 }
 
 button {
@@ -76,6 +164,21 @@ button {
   cursor: pointer;
 }
 
-button:hover {
+button:hover:not(:disabled) {
   background: #30363d;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+button.primary {
+  background: #238636;
+  border-color: #2ea043;
+  color: #ffffff;
+}
+
+button.primary:hover:not(:disabled) {
+  background: #2ea043;
 }

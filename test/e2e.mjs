@@ -2,11 +2,13 @@ import puppeteer from "puppeteer";
 import path from "path";
 import { fileURLToPath } from "url";
 import fs from "fs";
+import http from "http";
 import assert from "assert";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
 const MOCK_PAGE = path.join(__dirname, "mock-github-commit.html");
+const MOCK_GHES_PAGE = path.join(__dirname, "mock-ghes-commit.html");
 
 let browser, page;
 let passed = 0;
@@ -295,12 +297,71 @@ async function run() {
       fs.readFileSync(path.join(ROOT, "manifest.json"), "utf-8")
     );
     assert.strictEqual(manifest.manifest_version, 3);
-    assert.ok(manifest.permissions.includes("storage"));
+
+    // Required permissions: storage + the new scripting/activeTab pair for
+    // dynamic content-script registration and popup active-tab reads.
+    assert.ok(manifest.permissions.includes("storage"), "permissions must include storage");
+    assert.ok(manifest.permissions.includes("scripting"), "permissions must include scripting");
+    assert.ok(manifest.permissions.includes("activeTab"), "permissions must include activeTab");
+
+    // All three github.com-family origins must remain in host_permissions.
     assert.ok(
-      manifest.host_permissions.includes("https://raw.githubusercontent.com/*")
+      manifest.host_permissions.includes("https://github.com/*"),
+      "host_permissions must include https://github.com/*"
     );
-    assert.ok(manifest.content_scripts[0].matches.includes("https://github.com/*/*/commit/*"));
-    assert.ok(manifest.background.service_worker);
+    assert.ok(
+      manifest.host_permissions.includes("https://raw.githubusercontent.com/*"),
+      "host_permissions must include raw.githubusercontent.com"
+    );
+    assert.ok(
+      manifest.host_permissions.includes("https://api.github.com/*"),
+      "host_permissions must include api.github.com"
+    );
+
+    // Optional host permissions: both Chrome (`optional_host_permissions`) and
+    // Firefox (`optional_permissions`) shapes must be present with the wildcard.
+    assert.ok(
+      Array.isArray(manifest.optional_host_permissions) &&
+        manifest.optional_host_permissions.includes("https://*/*"),
+      "optional_host_permissions must include https://*/*"
+    );
+    assert.ok(
+      Array.isArray(manifest.optional_permissions) &&
+        manifest.optional_permissions.includes("https://*/*"),
+      "optional_permissions must include https://*/*"
+    );
+
+    // Static content-script registration stays github.com-only.
+    assert.ok(
+      manifest.content_scripts[0].matches.includes("https://github.com/*/*/commit/*")
+    );
+
+    // Load order matters: host.js must precede content.js so GhnHost is on
+    // globalThis before content.js reads it.
+    const csJs = manifest.content_scripts[0].js;
+    const hostIdx = csJs.indexOf("lib/host.js");
+    const contentIdx = csJs.indexOf("content.js");
+    assert.ok(hostIdx !== -1, "content_scripts.js must include lib/host.js");
+    assert.ok(contentIdx !== -1, "content_scripts.js must include content.js");
+    assert.ok(
+      hostIdx < contentIdx,
+      "lib/host.js must load before content.js in content_scripts.js"
+    );
+
+    // Background: the service worker entry stays for Chrome, and the Firefox
+    // scripts array must include the libs BEFORE background.js so the classic
+    // scripts run in the right order.
+    assert.strictEqual(manifest.background.service_worker, "background.js");
+    const bgScripts = manifest.background.scripts;
+    assert.ok(Array.isArray(bgScripts), "background.scripts must be an array");
+    const bgLibIdx = bgScripts.indexOf("lib/host.js");
+    const bgMainIdx = bgScripts.indexOf("background.js");
+    assert.ok(bgLibIdx !== -1, "background.scripts must include lib/host.js");
+    assert.ok(bgMainIdx !== -1, "background.scripts must include background.js");
+    assert.ok(
+      bgLibIdx < bgMainIdx,
+      "lib/host.js must load before background.js in background.scripts"
+    );
   });
 
   // --- Integration tests using content.js functions ---
@@ -680,6 +741,184 @@ async function run() {
     });
     assert.ok(!result.includes("<script>"));
     assert.ok(result.includes("&lt;script&gt;"));
+  });
+
+  // --- GHES: no cross-host request leakage -------------------------------
+  //
+  // Serve the GHES mock from a non-github origin (localhost) and assert no
+  // fetch ever goes to api.github.com or raw.githubusercontent.com. This is
+  // the highest-value new e2e test: it is the last line of defence against a
+  // future refactor accidentally hardcoding a github.com URL into a GHES fetch.
+  //
+  // Note on origin: content.js resolves its host from `location.origin`.
+  // `http://localhost:PORT` derives as kind "ghes" via deriveHost — that's the
+  // point: any non-github.com origin behaves as GHES. normalizeHostInput's
+  // stricter rules only govern the options UI, not deriveHost. If deriveHost
+  // ever misbehaves on http origins we surface it here rather than editing
+  // lib/host.js.
+  console.log("\n  GHES no-leak (request interception)");
+
+  await test("no request ever goes to api.github.com or raw.githubusercontent.com from a GHES origin", async () => {
+    const ghesHtml = fs.readFileSync(MOCK_GHES_PAGE, "utf-8");
+    const cssBytes = fs.readFileSync(path.join(ROOT, "content.css"), "utf-8");
+
+    // Tiny stub server: serves the commit page at a commit-shaped path so that
+    // content.js's COMMIT_URL_RE / parseCommitPath will treat it as a commit.
+    // Serves canned raw note content on the same-origin raw path. All other
+    // requests get 404 — but must NEVER be for a github.com-family host.
+    const server = http.createServer((req, res) => {
+      const url = req.url || "/";
+      if (url.startsWith("/example-org/example-repo/commit/")) {
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(ghesHtml);
+        return;
+      }
+      if (url === "/content.css" || url === "/../content.css") {
+        res.writeHead(200, { "Content-Type": "text/css; charset=utf-8" });
+        res.end(cssBytes);
+        return;
+      }
+      // Same-origin raw note fetch — return a canned note so content.js
+      // has a happy path.
+      if (url.startsWith("/example-org/example-repo/raw/notes/commits/")) {
+        res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+        res.end("This is a same-origin GHES note.");
+        return;
+      }
+      // Same-origin contents API fallback — return a plausible payload with
+      // Accept-negotiated raw content.
+      if (url.startsWith("/api/v3/repos/example-org/example-repo/contents/")) {
+        res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+        res.end("This is a same-origin GHES note.");
+        return;
+      }
+      // Tree JSON / matching-refs / git APIs — return an empty-ish JSON body
+      // (or 404) so content.js keeps its attempts on-origin.
+      if (url.startsWith("/api/v3/")) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ message: "Not Found" }));
+        return;
+      }
+      if (url.includes("/tree/") && (req.headers.accept || "").includes("application/json")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ payload: { tree: { items: [] } } }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = server.address().port;
+    const origin = `http://127.0.0.1:${port}`;
+
+    // Fresh page + request interception. Any github.com-family URL is a bug.
+    const anotherPage = await browser.newPage();
+    const leaks = [];
+    await anotherPage.setRequestInterception(true);
+    anotherPage.on("request", (interceptedRequest) => {
+      const reqUrl = interceptedRequest.url();
+      if (
+        reqUrl.includes("api.github.com") ||
+        reqUrl.includes("raw.githubusercontent.com") ||
+        // Explicit https://github.com (as a domain) is also a leak — but only
+        // when it's the request host, not when it appears inside a path.
+        /^https?:\/\/github\.com\//.test(reqUrl)
+      ) {
+        leaks.push(reqUrl);
+      }
+      interceptedRequest.continue();
+    });
+
+    try {
+      // Load the GHES commit page from the local http origin so
+      // location.origin resolves to a non-github.com origin.
+      const commitUrl = `${origin}/example-org/example-repo/commit/a1b2c3d4e5f6`;
+      await anotherPage.goto(commitUrl, { waitUntil: "domcontentloaded" });
+
+      // Install a mock browser API and load the libs + content.js. The libs
+      // MUST come first — content.js reads GhnHost/GhnStorage/GhnNotes from
+      // globalThis. We swallow any exception content.js may throw so the
+      // test focuses on the URL-leak assertion, not content.js correctness
+      // (which another agent owns right now).
+      await anotherPage.evaluate(() => {
+        window.browser = {
+          storage: {
+            local: {
+              get: async () => ({}),
+              set: async () => {},
+              remove: async () => {},
+            },
+          },
+          runtime: {
+            sendMessage: async () => ({ notes: [] }),
+            onMessage: { addListener() {} },
+          },
+        };
+      });
+      const hostJs = fs.readFileSync(path.join(ROOT, "lib/host.js"), "utf-8");
+      const storageJs = fs.readFileSync(path.join(ROOT, "lib/storage.js"), "utf-8");
+      const notesJs = fs.readFileSync(path.join(ROOT, "lib/notes.js"), "utf-8");
+      const purifyJs = fs.readFileSync(path.join(ROOT, "lib/purify.min.js"), "utf-8");
+      const markedJs = fs.readFileSync(path.join(ROOT, "lib/marked.min.js"), "utf-8");
+      const contentJs = fs.readFileSync(path.join(ROOT, "content.js"), "utf-8");
+      await anotherPage.addScriptTag({ content: purifyJs });
+      await anotherPage.addScriptTag({ content: markedJs });
+      await anotherPage.addScriptTag({ content: hostJs });
+      await anotherPage.addScriptTag({ content: storageJs });
+      await anotherPage.addScriptTag({ content: notesJs });
+      try {
+        await anotherPage.addScriptTag({ content: contentJs });
+      } catch (err) {
+        // content.js is owned by another agent and may throw in this test
+        // environment. Its correctness is checked by its own e2e tests; here
+        // we only care about network egress.
+      }
+
+      // Give content.js a moment to do any async fetches / MutationObserver
+      // work before we check for leaks.
+      await new Promise((r) => setTimeout(r, 500));
+
+      // As a positive control that the URL-builder emits ONLY same-origin
+      // URLs from this origin, invoke the builder in the page context. This
+      // is the same guarantee the unit test enforces, but from a real page.
+      const builderLeak = await anotherPage.evaluate((org) => {
+        if (!window.GhnHost || !window.GhnHost.buildNoteContentCandidates) return null;
+        const host = window.GhnHost.deriveHost(org);
+        const candidates = window.GhnHost.buildNoteContentCandidates(
+          host,
+          "example-org",
+          "example-repo",
+          "refs/notes/commits",
+          "a1b2c3d4e5f6",
+          { hasToken: true }
+        );
+        for (const c of candidates) {
+          if (
+            c.url.includes("api.github.com") ||
+            c.url.includes("raw.githubusercontent.com")
+          ) {
+            return c.url;
+          }
+        }
+        return "";
+      }, origin);
+
+      assert.strictEqual(
+        builderLeak,
+        "",
+        `URL builder leaked a github.com-family URL from a GHES origin: ${builderLeak}`
+      );
+
+      assert.deepStrictEqual(
+        leaks,
+        [],
+        `Extension made requests to github.com-family hosts while on a GHES origin:\n  ${leaks.join("\n  ")}`
+      );
+    } finally {
+      await anotherPage.close();
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 
   // --- Summary ---

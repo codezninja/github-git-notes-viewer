@@ -8,12 +8,28 @@
   <body>
     <div class="popup">
       <h1>Git Notes Viewer</h1>
-      <div id="auth-status" class="status-row">
-        <span class="dot"></span>
-        <span class="label">Checking...</span>
-      </div>
+
+      <section id="context" class="context" hidden>
+        <div class="context-header">
+          <span class="dot" id="context-dot"></span>
+          <span class="label" id="context-label">Checking...</span>
+        </div>
+        <div class="context-detail" id="context-detail"></div>
+        <div class="context-actions">
+          <button id="context-primary" class="primary" hidden></button>
+          <button id="context-secondary" hidden></button>
+        </div>
+        <div class="context-message" id="context-message" hidden></div>
+      </section>
+
+      <section class="hosts">
+        <div class="hosts-title">Configured hosts</div>
+        <ul id="host-list" class="host-list"></ul>
+      </section>
+
       <button id="open-settings">Settings</button>
     </div>
+    <script src="lib/host.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>

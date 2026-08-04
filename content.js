@@ -1,16 +1,50 @@
 if (typeof browser === "undefined") globalThis.browser = chrome;
 
+// --- Shared library handles ---
+// lib/host.js, lib/storage.js, lib/notes.js are injected before content.js by the
+// manifest. When absent (unit-test harness loads content.js at about:blank with no
+// libs), skip all network/DOM work but keep every function defined and callable.
+const H = globalThis.GhnHost;
+const S = globalThis.GhnStorage;
+const N = globalThis.GhnNotes;
+const LIBS_READY = Boolean(H && S && N);
+if (!LIBS_READY) {
+  console.warn(
+    "github-git-notes-viewer: GhnHost/GhnStorage/GhnNotes not loaded; content script will not run."
+  );
+}
+
+// Resolve the current host once, tolerating unusual origins (about:blank in tests).
+let HOST = null;
+if (LIBS_READY) {
+  try {
+    HOST = H.deriveHost(location.origin);
+  } catch {
+    HOST = null;
+  }
+}
+
 const CONTAINER_ID = "ghn-notes-container";
 const COMMIT_URL_RE = /^\/([^/]+)\/([^/]+)\/commit\/([0-9a-f]{5,40})$/i;
 const COLLAPSE_HEIGHT = 800; // px — notes taller than this start collapsed
 
+// Preserved for test compatibility; source of truth is lib/storage.js.
+const DEFAULT_NOTE_REFS = (S && S.DEFAULT_NOTE_REFS) || [
+  "refs/notes/commits",
+  "refs/notes/claude-prompt-trail",
+];
+
 let lastProcessedUrl = null;
 let processGeneration = 0;
 
+// Per-origin token cache. One content-script instance only ever sees one origin,
+// but keying by origin makes the invariant explicit and prevents a token from
+// ever being sent to the wrong host if that assumption breaks.
+const tokenCache = new Map();
+
 function parseCommitUrl() {
-  const match = location.pathname.match(COMMIT_URL_RE);
-  if (!match) return null;
-  return { owner: match[1], repo: match[2], commitSha: match[3] };
+  if (!LIBS_READY) return null;
+  return H.parseCommitPath(location.pathname);
 }
 
 function removeExisting() {
@@ -66,89 +100,52 @@ function waitForInjectionPoint(timeout = 5000) {
   });
 }
 
-// --- Note fetching (cookie-based, same-origin on github.com) ---
+// --- Token access ---
 
-// Fetch the notes tree from GitHub's JSON endpoint (same-origin, session cookie included)
-async function fetchNotesTreeEntries(owner, repo, noteRef) {
-  const branchName = noteRef.replace(/^refs\//, "");
-
-  const res = await fetch(`/${owner}/${repo}/tree/${branchName}`, {
-    headers: {
-      Accept: "application/json",
-      "X-Requested-With": "XMLHttpRequest",
-    },
-    credentials: "same-origin",
-  });
-
-  if (!res.ok) return null;
-
-  const data = await res.json();
-  return data?.payload?.tree?.items || null;
-}
-
-// Get stored PAT (if configured) for private repo fallback
-let _cachedToken = undefined;
-async function getStoredToken() {
-  if (_cachedToken !== undefined) return _cachedToken;
+async function getStoredToken(origin) {
+  if (!LIBS_READY || !origin) return null;
+  if (tokenCache.has(origin)) return tokenCache.get(origin);
+  let token = null;
   try {
-    const { githubToken } = await browser.storage.local.get("githubToken");
-    _cachedToken = githubToken || null;
+    token = await S.getToken(origin);
   } catch {
-    _cachedToken = null;
+    token = null;
   }
-  return _cachedToken;
+  tokenCache.set(origin, token || null);
+  return token || null;
 }
 
-// Fetch note content for a specific commit SHA
-async function fetchNoteContent(owner, repo, noteRef, commitSha) {
-  const branchName = noteRef.replace(/^refs\//, "");
-  const cacheBust = `_=${Date.now()}`;
+// --- Note content fetching (per-host candidate ladder in lib/host.js) ---
 
-  // Build candidate paths: direct and fanout
-  const paths = [
-    `${branchName}/${commitSha}`,
-    `${branchName}/${commitSha.slice(0, 2)}/${commitSha.slice(2)}`,
+async function fetchNoteContent(host, owner, repo, noteRef, commitSha) {
+  if (!LIBS_READY || !host) return null;
+
+  const token = await getStoredToken(host.origin);
+  const hasToken = Boolean(token);
+  const cacheBust = Date.now();
+
+  // Try both flat (<sha>) and fanout (<sha[0:2]>/<sha[2:]>) path shapes.
+  const notePaths = [
+    commitSha,
+    `${commitSha.slice(0, 2)}/${commitSha.slice(2)}`,
   ];
 
-  // Strategy 1: raw.githubusercontent.com without auth (works for public repos)
-  for (const path of paths) {
-    try {
-      const url = `https://raw.githubusercontent.com/${owner}/${repo}/${path}?${cacheBust}`;
-      const res = await fetch(url);
-      if (res.ok) return await res.text();
-    } catch {
-      continue;
-    }
-  }
-
-  // Strategy 2: raw.githubusercontent.com with PAT
-  const token = await getStoredToken();
-  if (token) {
-    for (const path of paths) {
+  for (const notePath of notePaths) {
+    const candidates = H.buildNoteContentCandidates(
+      host, owner, repo, noteRef, notePath, { hasToken, cacheBust }
+    );
+    for (const candidate of candidates) {
       try {
-        const url = `https://raw.githubusercontent.com/${owner}/${repo}/${path}?${cacheBust}`;
-        const res = await fetch(url, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (res.ok) return await res.text();
-      } catch {
-        continue;
-      }
-    }
-  }
-
-  // Strategy 3: GitHub Contents API (needed for private repos with fine-grained PATs,
-  // since raw.githubusercontent.com may not resolve notes/* refs)
-  if (token) {
-    const filePaths = [commitSha, `${commitSha.slice(0, 2)}/${commitSha.slice(2)}`];
-    for (const filePath of filePaths) {
-      try {
-        const url = `https://api.github.com/repos/${owner}/${repo}/contents/${filePath}?ref=${encodeURIComponent(noteRef)}`;
-        const res = await fetch(url, {
-          headers: {
-            Accept: "application/vnd.github.raw+json",
-            Authorization: `Bearer ${token}`,
-          },
+        const headers = {};
+        if (candidate.accept) headers.Accept = candidate.accept;
+        // Only attach the Authorization header when the candidate explicitly
+        // asks for it. Never send a token to an auth:"none" candidate.
+        if (candidate.auth === "token" && token) {
+          headers.Authorization = `Bearer ${token}`;
+        }
+        const res = await fetch(candidate.url, {
+          headers,
+          credentials: candidate.credentials,
         });
         if (res.ok) return await res.text();
       } catch {
@@ -158,104 +155,199 @@ async function fetchNoteContent(owner, repo, noteRef, commitSha) {
   }
 
   return null;
+}
+
+// --- Tree discovery (capability-probed ladder) ---
+//
+// Downstream code expects [{ name, contentType: "file"|"directory" }, ...]. Tier 1
+// returns that shape from the GitHub tree JSON payload. Tier 2 adapts the REST
+// tree Map<path,{type,sha}> from lib/notes.js into the same shape.
+
+async function fetchNotesTreeEntries(host, owner, repo, noteRef) {
+  if (!LIBS_READY || !host) return null;
+
+  // Tier 1: tree JSON payload (github.com; supported on newer GHES).
+  let treeJsonKnownBroken = false;
+  try {
+    const caps = await S.getCapabilities(host.origin);
+    if (caps && caps.treeJson === false) treeJsonKnownBroken = true;
+  } catch {
+    // Capability cache unavailable — proceed with the probe.
+  }
+
+  if (!treeJsonKnownBroken) {
+    try {
+      const branch = H.refToBranchPath(noteRef);
+      const res = await fetch(`${host.origin}/${owner}/${repo}/tree/${branch}`, {
+        headers: {
+          Accept: "application/json",
+          "X-Requested-With": "XMLHttpRequest",
+        },
+        credentials: "same-origin",
+      });
+      if (res.ok) {
+        let data = null;
+        try {
+          data = await res.json();
+        } catch {
+          data = null;
+        }
+        const items = data && data.payload && data.payload.tree && data.payload.tree.items;
+        if (Array.isArray(items)) {
+          try { await S.setCapability(host.origin, { treeJson: true }); } catch { /* ignore */ }
+          return items;
+        }
+      }
+      // Non-ok, non-JSON, or missing shape — remember this host can't do it.
+      try { await S.setCapability(host.origin, { treeJson: false }); } catch { /* ignore */ }
+    } catch {
+      try { await S.setCapability(host.origin, { treeJson: false }); } catch { /* ignore */ }
+    }
+  }
+
+  // Tier 2: REST fallback via lib/notes.js.
+  try {
+    const token = await getStoredToken(host.origin);
+    const tree = await N.fetchNotesTree(host, owner, repo, noteRef, token);
+    const items = [];
+    for (const [name, entry] of tree) {
+      items.push({
+        name,
+        contentType: entry.type === "tree" ? "directory" : "file",
+      });
+    }
+    return items;
+  } catch {
+    // Tier 3: give up.
+    return null;
+  }
 }
 
 // Fetch git note, resolving the full commit SHA if needed.
-// Returns { content, needsToken } or null.
-async function fetchGitNote(owner, repo, noteRef, commitSha) {
-  // Strategy 1: Try fetching the note content directly
-  const directContent = await fetchNoteContent(owner, repo, noteRef, commitSha);
-  if (directContent !== null) return { content: directContent };
+// Returns { content } | { content: null, needsToken: true } | null.
+async function fetchGitNote(host, owner, repo, noteRef, commitSha) {
+  if (!LIBS_READY || !host) return null;
 
-  // Strategy 2: Use the JSON tree endpoint to find the full SHA
-  const entries = await fetchNotesTreeEntries(owner, repo, noteRef);
-  if (!entries) return null;
-
-  const match = entries.find(
-    (e) => e.name === commitSha || e.name.startsWith(commitSha)
-  );
-
-  if (match && match.contentType === "file") {
-    const content = await fetchNoteContent(owner, repo, noteRef, match.name);
-    if (content !== null) return { content };
-    return { content: null, needsToken: true };
+  // Tier a: direct content fetch (flat + fanout paths).
+  try {
+    const directContent = await fetchNoteContent(host, owner, repo, noteRef, commitSha);
+    if (directContent !== null) return { content: directContent };
+  } catch {
+    // Swallow — fall through to tree discovery.
   }
 
-  // Check fanout
-  const prefix = commitSha.slice(0, 2);
-  const fanoutDir = entries.find(
-    (e) => e.name === prefix && e.contentType === "directory"
-  );
-  if (fanoutDir) {
-    const branchName = noteRef.replace(/^refs\//, "");
-    const subRes = await fetch(`/${owner}/${repo}/tree/${branchName}/${prefix}`, {
-      headers: {
-        Accept: "application/json",
-        "X-Requested-With": "XMLHttpRequest",
-      },
-      credentials: "same-origin",
-    });
-    if (subRes.ok) {
-      const subData = await subRes.json();
-      const subEntries = subData?.payload?.tree?.items || [];
-      const suffix = commitSha.slice(2);
-      const subMatch = subEntries.find(
-        (e) => e.name === suffix || e.name.startsWith(suffix)
+  // Tier b: tree JSON to resolve an abbreviated or actual entry name.
+  try {
+    const entries = await fetchNotesTreeEntries(host, owner, repo, noteRef);
+    if (entries) {
+      const match = entries.find(
+        (e) => e.name === commitSha || e.name.startsWith(commitSha)
       );
-      if (subMatch) {
-        const content = await fetchNoteContent(
-          owner, repo, noteRef, `${prefix}/${subMatch.name}`
-        );
+
+      if (match && match.contentType === "file") {
+        const content = await fetchNoteContent(host, owner, repo, noteRef, match.name);
         if (content !== null) return { content };
         return { content: null, needsToken: true };
       }
+
+      // Fanout subdirectory listing — same-origin JSON, capability-guarded.
+      const prefix = commitSha.slice(0, 2);
+      const fanoutDir = entries.find(
+        (e) => e.name === prefix && e.contentType === "directory"
+      );
+      if (fanoutDir) {
+        let treeJsonKnownBroken = false;
+        try {
+          const caps = await S.getCapabilities(host.origin);
+          if (caps && caps.treeJson === false) treeJsonKnownBroken = true;
+        } catch { /* ignore */ }
+
+        if (!treeJsonKnownBroken) {
+          const branch = H.refToBranchPath(noteRef);
+          try {
+            const subRes = await fetch(
+              `${host.origin}/${owner}/${repo}/tree/${branch}/${prefix}`,
+              {
+                headers: {
+                  Accept: "application/json",
+                  "X-Requested-With": "XMLHttpRequest",
+                },
+                credentials: "same-origin",
+              }
+            );
+            if (subRes.ok) {
+              let subData = null;
+              try {
+                subData = await subRes.json();
+              } catch {
+                subData = null;
+              }
+              const subEntries =
+                (subData && subData.payload && subData.payload.tree &&
+                  subData.payload.tree.items) || [];
+              const suffix = commitSha.slice(2);
+              const subMatch = subEntries.find(
+                (e) => e.name === suffix || e.name.startsWith(suffix)
+              );
+              if (subMatch) {
+                const content = await fetchNoteContent(
+                  host, owner, repo, noteRef, `${prefix}/${subMatch.name}`
+                );
+                if (content !== null) return { content };
+                return { content: null, needsToken: true };
+              }
+            }
+          } catch {
+            // Fall through to REST fallback.
+          }
+        }
+      }
     }
+  } catch {
+    // Swallow — fall through to REST fallback.
+  }
+
+  // Tier c: REST fallback — resolve path via lib/notes.js, fetch content,
+  // and if the raw path 404s, decode the blob directly.
+  try {
+    const token = await getStoredToken(host.origin);
+    const resolved = await N.resolveNotePath(host, owner, repo, noteRef, commitSha, token);
+    if (resolved) {
+      const content = await fetchNoteContent(host, owner, repo, noteRef, resolved.path);
+      if (content !== null) return { content };
+      try {
+        const blobContent = await N.fetchBlobContent(host, owner, repo, resolved.blobSha, token);
+        if (blobContent !== null && blobContent !== undefined) return { content: blobContent };
+      } catch {
+        // Blob fetch failed — note exists but we can't read it.
+      }
+      return { content: null, needsToken: true };
+    }
+  } catch {
+    // Swallow — final tier gives up.
   }
 
   return null;
 }
 
-// Common note ref names to always try
-const DEFAULT_NOTE_REFS = [
-  "refs/notes/commits",
-  "refs/notes/claude-prompt-trail",
-];
-
-// Auto-discover note refs via GitHub API (works without auth for public repos)
-async function discoverNoteRefs(owner, repo) {
-  try {
-    const headers = { Accept: "application/vnd.github+json" };
-    const token = await getStoredToken();
-    if (token) headers.Authorization = `Bearer ${token}`;
-
-    const res = await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/git/matching-refs/notes`,
-      { headers }
-    );
-    if (res.ok) {
-      const data = await res.json();
-      return data.map((r) => r.ref).filter((r) => r.startsWith("refs/notes/"));
-    }
-  } catch {
-    // API unavailable — fall back to defaults
-  }
-  return [];
+// Auto-discover note refs — delegates to lib/notes.js (returns [] on failure).
+async function discoverNoteRefs(host, owner, repo) {
+  if (!LIBS_READY || !host) return [];
+  const token = await getStoredToken(host.origin);
+  return N.discoverNoteRefs(host, owner, repo, token);
 }
 
-// Get note refs: auto-discovered + defaults + user-configured
+// Get note refs: defaults ∪ discovered ∪ user-configured.
 async function getNoteRefs(owner, repo) {
   const refs = new Set(DEFAULT_NOTE_REFS);
+  if (!LIBS_READY || !HOST) return [...refs];
 
-  // Auto-discover from API
-  const discovered = await discoverNoteRefs(owner, repo);
+  const discovered = await discoverNoteRefs(HOST, owner, repo);
   for (const r of discovered) refs.add(r);
 
-  // Add user-configured refs
   try {
-    const { noteRefs } = await browser.storage.local.get("noteRefs");
-    if (noteRefs && noteRefs.length > 0) {
-      for (const r of noteRefs) refs.add(r);
-    }
+    const userRefs = await S.getNoteRefs();
+    for (const r of userRefs) refs.add(r);
   } catch {
     // storage might not be available
   }
@@ -462,19 +554,34 @@ function showTokenNeeded(container) {
 
   const body = document.createElement("div");
   body.className = "ghn-body";
-  body.textContent = "Notes found but can\u2019t be read \u2014 ";
+
   const link = document.createElement("a");
   link.className = "ghn-settings-link";
-  link.textContent = "configure a GitHub token";
   link.href = "#";
   link.addEventListener("click", (e) => {
     e.preventDefault();
     browser.runtime.sendMessage({ type: "OPEN_OPTIONS" });
   });
-  body.appendChild(link);
-  body.appendChild(document.createTextNode(" for private repo support."));
-  box.appendChild(body);
 
+  if (HOST && HOST.kind === "ghes") {
+    body.appendChild(
+      document.createTextNode("Notes found but can’t be read — sign in to ")
+    );
+    body.appendChild(document.createTextNode(HOST.label));
+    body.appendChild(document.createTextNode(" or "));
+    link.textContent = "configure a token";
+    body.appendChild(link);
+    body.appendChild(document.createTextNode("."));
+  } else {
+    body.appendChild(
+      document.createTextNode("Notes found but can’t be read — ")
+    );
+    link.textContent = "configure a GitHub token";
+    body.appendChild(link);
+    body.appendChild(document.createTextNode(" for private repo support."));
+  }
+
+  box.appendChild(body);
   container.appendChild(box);
 }
 
@@ -511,6 +618,9 @@ function escapeHtml(str) {
 // --- Main flow ---
 
 async function processCommitPage() {
+  // Bail immediately if libs are missing or the current origin isn't a supported host.
+  if (!LIBS_READY || !HOST) return;
+
   const url = location.href;
   if (url === lastProcessedUrl) return;
   lastProcessedUrl = url;
@@ -535,9 +645,9 @@ async function processCommitPage() {
     for (const ref of noteRefs) {
       try {
         const result = await fetchGitNote(
-          commit.owner, commit.repo, ref, commit.commitSha
+          HOST, commit.owner, commit.repo, ref, commit.commitSha
         );
-        if (result && result.content !== null) {
+        if (result && result.content !== null && result.content !== undefined) {
           results.push({ ref, content: result.content });
         } else if (result && result.needsToken) {
           needsToken = true;

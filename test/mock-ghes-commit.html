@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en" data-color-mode="dark" data-dark-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <title>feat: add streaming support for real-time updates · example-org/example-repo@a1b2c3d</title>
+    <style>
+      /* GitHub Enterprise Server dark theme approximation.
+         Identical DOM hooks (#diff-stats, .container) to mock-github-commit.html so
+         the same injection assertions work — the difference is that this file is
+         intended to be served from a NON-github.com origin (i.e. any host we treat
+         as GHES via deriveHost). */
+      :root {
+        --bgColor-default: #0d1117;
+        --bgColor-muted: #161b22;
+        --borderColor-default: #30363d;
+        --fgColor-default: #e6edf3;
+        --fgColor-muted: #8b949e;
+        --fgColor-accent: #58a6ff;
+        --fgColor-danger: #f85149;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial,
+          sans-serif;
+        background: var(--bgColor-default);
+        color: var(--fgColor-default);
+        margin: 0;
+        padding: 0;
+      }
+
+      .header {
+        background: #010409;
+        border-bottom: 1px solid var(--borderColor-default);
+        padding: 16px 32px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 14px;
+      }
+
+      .header svg {
+        fill: #f0f6fc;
+      }
+
+      .header a {
+        color: var(--fgColor-accent);
+        text-decoration: none;
+      }
+
+      .header .sep {
+        color: var(--fgColor-muted);
+      }
+
+      .container {
+        max-width: 1012px;
+        margin: 0 auto;
+        padding: 24px 32px;
+      }
+
+      .commit-title {
+        font-size: 22px;
+        font-weight: 400;
+        margin: 0 0 8px 0;
+        line-height: 1.4;
+      }
+
+      .commit-desc {
+        font-size: 14px;
+        color: var(--fgColor-muted);
+        margin: 0 0 16px 0;
+        font-family:
+          ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+      }
+
+      .commit-meta {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 14px;
+        color: var(--fgColor-muted);
+        padding: 12px 0;
+        border-bottom: 1px solid var(--borderColor-default);
+        margin-bottom: 16px;
+      }
+
+      .commit-meta .author {
+        color: var(--fgColor-default);
+        font-weight: 600;
+      }
+
+      .avatar {
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        background: #30363d;
+      }
+
+      .commit-sha {
+        font-family:
+          ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+        font-size: 13px;
+        color: var(--fgColor-accent);
+        background: rgba(88, 166, 255, 0.1);
+        padding: 2px 8px;
+        border-radius: 6px;
+        margin-left: auto;
+      }
+
+      .browse-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 5px 12px;
+        background: var(--bgColor-muted);
+        border: 1px solid var(--borderColor-default);
+        border-radius: 6px;
+        color: var(--fgColor-default);
+        font-size: 13px;
+        margin-bottom: 16px;
+        cursor: pointer;
+      }
+
+      #diff-stats {
+        padding: 12px 16px;
+        background: var(--bgColor-muted);
+        border: 1px solid var(--borderColor-default);
+        border-radius: 6px;
+        font-size: 13px;
+        color: var(--fgColor-muted);
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .stat-add {
+        color: #3fb950;
+      }
+
+      .stat-del {
+        color: #f85149;
+      }
+
+      .diff-bar {
+        display: flex;
+        gap: 1px;
+        margin-left: 4px;
+      }
+
+      .diff-bar span {
+        width: 8px;
+        height: 8px;
+        border-radius: 1px;
+      }
+
+      .diff-bar .add {
+        background: #3fb950;
+      }
+
+      .diff-bar .del {
+        background: #f85149;
+      }
+
+      .diff-bar .neutral {
+        background: #30363d;
+      }
+
+      .file-diff {
+        margin-top: 16px;
+        border: 1px solid var(--borderColor-default);
+        border-radius: 6px;
+        overflow: hidden;
+      }
+
+      .file-header {
+        background: var(--bgColor-muted);
+        border-bottom: 1px solid var(--borderColor-default);
+        padding: 8px 16px;
+        font-size: 13px;
+        font-family:
+          ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .file-badge {
+        font-size: 11px;
+        padding: 1px 6px;
+        border-radius: 8px;
+        font-weight: 600;
+      }
+
+      .file-badge.modified {
+        background: rgba(210, 153, 34, 0.2);
+        color: #d29922;
+      }
+
+      .diff-lines {
+        font-family:
+          ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+        font-size: 12px;
+        line-height: 20px;
+      }
+
+      .diff-line {
+        padding: 0 16px 0 60px;
+        position: relative;
+        white-space: pre;
+      }
+
+      .diff-line .ln {
+        position: absolute;
+        left: 0;
+        width: 52px;
+        padding: 0 8px;
+        text-align: right;
+        color: rgba(139, 148, 158, 0.4);
+        user-select: none;
+      }
+
+      .diff-line.add {
+        background: rgba(63, 185, 80, 0.15);
+        color: #aff5b4;
+      }
+
+      .diff-line.del {
+        background: rgba(248, 81, 73, 0.15);
+        color: #ffd8d4;
+      }
+
+      .diff-line.context {
+        color: var(--fgColor-muted);
+      }
+
+      .diff-line.hunk {
+        background: rgba(88, 166, 255, 0.1);
+        color: rgba(139, 148, 158, 0.7);
+        padding-top: 4px;
+        padding-bottom: 4px;
+      }
+    </style>
+    <link rel="stylesheet" href="../content.css" />
+  </head>
+  <body>
+    <div class="header">
+      <svg height="32" width="32" viewBox="0 0 16 16">
+        <path
+          d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"
+        />
+      </svg>
+      <span style="color: var(--fgColor-muted); font-size: 12px; padding: 2px 6px; border: 1px solid var(--borderColor-default); border-radius: 4px;">Enterprise Server</span>
+      <a href="#">example-org</a>
+      <span class="sep">/</span>
+      <a href="#"><strong>example-repo</strong></a>
+    </div>
+
+    <div class="container">
+      <h1 class="commit-title">feat: add streaming support for real-time updates</h1>
+      <p class="commit-desc">
+        Implements server-sent events for live data streaming on the internal cluster.
+        Includes reconnection logic and backpressure handling.
+      </p>
+
+      <div class="commit-meta">
+        <div class="avatar"></div>
+        <span class="author">janedev</span>
+        committed
+        <span>2 days ago</span>
+        <span class="commit-sha">a1b2c3d</span>
+      </div>
+
+      <button class="browse-btn">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+          <path
+            d="M0 3.75C0 2.784.784 2 1.75 2h12.5c.966 0 1.75.784 1.75 1.75v8.5A1.75 1.75 0 0 1 14.25 14H1.75A1.75 1.75 0 0 1 0 12.25Zm1.75-.25a.25.25 0 0 0-.25.25v8.5c0 .138.112.25.25.25h12.5a.25.25 0 0 0 .25-.25v-8.5a.25.25 0 0 0-.25-.25Z"
+          />
+        </svg>
+        Browse files
+      </button>
+
+      <!-- Extension notes container is injected here by content.js
+           (before #diff-stats, same as on github.com) -->
+
+      <div id="diff-stats">
+        Showing <strong style="color: var(--fgColor-default)">3 changed files</strong> with
+        <span class="stat-add">47 additions</span> and
+        <span class="stat-del">12 deletions</span>.
+        <div class="diff-bar">
+          <span class="add"></span><span class="add"></span
+          ><span class="add"></span><span class="add"></span
+          ><span class="del"></span>
+        </div>
+      </div>
+
+      <div id="diff-content-parent">
+        <div class="file-diff">
+          <div class="file-header">
+            <span class="file-badge modified">M</span>
+            src/streaming/handler.ts
+          </div>
+          <div class="diff-lines">
+            <div class="diff-line hunk">
+              <span class="ln"></span>@@ -14,6 +14,18 @@ export class StreamHandler {
+            </div>
+            <div class="diff-line context">
+              <span class="ln">14</span>  private connections: Map&lt;string, Connection&gt; = new Map();
+            </div>
+            <div class="diff-line add">
+              <span class="ln">16</span>+ private backpressureThreshold: number = 1024 * 64;
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

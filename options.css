@@ -12,7 +12,7 @@ body {
 }
 
 .container {
-  max-width: 600px;
+  max-width: 720px;
   margin: 0 auto;
 }
 
@@ -118,6 +118,26 @@ button.primary:hover {
   background: #2ea043;
 }
 
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.link-button {
+  background: none;
+  border: none;
+  padding: 0;
+  color: #58a6ff;
+  font-size: 13px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.link-button:hover {
+  background: none;
+  color: #79b8ff;
+}
+
 .status {
   margin-top: 8px;
   padding: 8px 12px;
@@ -141,4 +161,155 @@ button.primary:hover {
   background: rgba(88, 166, 255, 0.15);
   color: #58a6ff;
   border: 1px solid rgba(88, 166, 255, 0.4);
+}
+
+.status.warning {
+  background: rgba(210, 153, 34, 0.15);
+  color: #d29922;
+  border: 1px solid rgba(210, 153, 34, 0.4);
+}
+
+/* --- host rows --- */
+
+.hosts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.host-row {
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 12px;
+  background: #161b22;
+}
+
+.host-row.warning {
+  border-color: rgba(210, 153, 34, 0.5);
+}
+
+.host-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.host-label {
+  font-weight: 600;
+  font-size: 14px;
+  color: #e6edf3;
+  font-family: monospace;
+}
+
+.host-kind-badge {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid #30363d;
+  color: #8b949e;
+  background: #0d1117;
+  text-transform: lowercase;
+}
+
+.host-kind-badge.dotcom {
+  color: #58a6ff;
+  border-color: rgba(88, 166, 255, 0.4);
+}
+
+.host-kind-badge.ghes {
+  color: #d2a8ff;
+  border-color: rgba(210, 168, 255, 0.4);
+}
+
+.host-remove {
+  margin-left: auto;
+  padding: 2px 8px;
+  font-size: 14px;
+  line-height: 1;
+  color: #8b949e;
+}
+
+.host-remove:hover {
+  background: rgba(248, 81, 73, 0.15);
+  color: #f85149;
+  border-color: rgba(248, 81, 73, 0.4);
+}
+
+.host-token-help {
+  font-size: 12px;
+  color: #8b949e;
+  margin: 0 0 8px 0;
+}
+
+.host-token-help a {
+  color: #58a6ff;
+}
+
+.host-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.host-status {
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.host-status.success {
+  background: rgba(46, 160, 67, 0.15);
+  color: #3fb950;
+  border: 1px solid rgba(46, 160, 67, 0.4);
+}
+
+.host-status.error {
+  background: rgba(248, 81, 73, 0.15);
+  color: #f85149;
+  border: 1px solid rgba(248, 81, 73, 0.4);
+}
+
+.host-status.info {
+  background: rgba(88, 166, 255, 0.15);
+  color: #58a6ff;
+  border: 1px solid rgba(88, 166, 255, 0.4);
+}
+
+.host-status.warning {
+  background: rgba(210, 153, 34, 0.15);
+  color: #d29922;
+  border: 1px solid rgba(210, 153, 34, 0.4);
+}
+
+.host-warning-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(210, 153, 34, 0.12);
+  border: 1px solid rgba(210, 153, 34, 0.4);
+  color: #d29922;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.host-warning-banner button {
+  margin-left: auto;
+}
+
+.add-host {
+  margin-top: 8px;
+}
+
+.add-host-label {
+  display: block;
+  font-size: 13px;
+  color: #8b949e;
+  margin-bottom: 6px;
 }

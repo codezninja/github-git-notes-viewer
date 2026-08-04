@@ -1,11 +1,13 @@
 import puppeteer from "puppeteer";
 import path from "path";
 import { fileURLToPath } from "url";
+import { createRequire } from "module";
 import fs from "fs";
 import assert from "assert";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
+const require = createRequire(import.meta.url);
 
 let browser, page;
 let passed = 0;
@@ -442,6 +444,401 @@ async function run() {
       escapeHtml("&#60;script&#62;alert(1)&#60;/script&#62;")
     );
     assert.ok(result.includes("&amp;#60;"));
+  });
+
+  // ========================================================================
+  // lib/host.js and lib/storage.js — plain Node-side pure-function tests.
+  // These libs support CommonJS via `if (module.exports)` at the bottom, so
+  // we can require them directly. storage.js reads GhnHost from globalThis at
+  // load time, so we set that first, then require. A fresh in-memory mock for
+  // browser.storage.local is installed before each storage test.
+  // ========================================================================
+
+  globalThis.GhnHost = require(path.join(ROOT, "lib/host.js"));
+  const GhnHost = globalThis.GhnHost;
+  const GhnStorage = require(path.join(ROOT, "lib/storage.js"));
+
+  // Fresh mock storage backed by a plain object. setStorageState() seeds it.
+  function installMockStorage(seed = {}) {
+    const store = { ...seed };
+    globalThis.browser = {
+      storage: {
+        local: {
+          get: async (keys) => {
+            if (keys === null || keys === undefined) return { ...store };
+            if (typeof keys === "string") {
+              return keys in store ? { [keys]: store[keys] } : {};
+            }
+            if (Array.isArray(keys)) {
+              const out = {};
+              for (const k of keys) if (k in store) out[k] = store[k];
+              return out;
+            }
+            // object of defaults
+            const out = {};
+            for (const k of Object.keys(keys)) {
+              out[k] = k in store ? store[k] : keys[k];
+            }
+            return out;
+          },
+          set: async (obj) => {
+            Object.assign(store, obj);
+          },
+          remove: async (keys) => {
+            const arr = Array.isArray(keys) ? keys : [keys];
+            for (const k of arr) delete store[k];
+          },
+          clear: async () => {
+            for (const k of Object.keys(store)) delete store[k];
+          },
+        },
+      },
+    };
+    return store;
+  }
+
+  // -------------- deriveHost --------------
+  console.log("\n  lib/host.js — deriveHost");
+
+  await test("github.com origin => dotcom", async () => {
+    const h = GhnHost.deriveHost("https://github.com");
+    assert.strictEqual(h.kind, "dotcom");
+    assert.strictEqual(h.apiBase, "https://api.github.com");
+    assert.strictEqual(h.rawOrigin, "https://raw.githubusercontent.com");
+    assert.strictEqual(h.origin, "https://github.com");
+    assert.strictEqual(h.hostname, "github.com");
+  });
+
+  await test("GHES origin => kind ghes, apiBase /api/v3, rawOrigin null", async () => {
+    const h = GhnHost.deriveHost("https://ghe.example.com");
+    assert.strictEqual(h.kind, "ghes");
+    assert.strictEqual(h.apiBase, "https://ghe.example.com/api/v3");
+    assert.strictEqual(h.rawOrigin, null);
+    assert.strictEqual(h.origin, "https://ghe.example.com");
+    assert.strictEqual(h.hostname, "ghe.example.com");
+  });
+
+  await test("trailing slash tolerated", async () => {
+    const h = GhnHost.deriveHost("https://ghe.example.com/");
+    assert.strictEqual(h.origin, "https://ghe.example.com");
+    assert.strictEqual(h.apiBase, "https://ghe.example.com/api/v3");
+  });
+
+  await test("uppercase hostname normalised to lowercase", async () => {
+    const h = GhnHost.deriveHost("https://GHE.Example.COM");
+    assert.strictEqual(h.hostname, "ghe.example.com");
+    assert.strictEqual(h.kind, "ghes");
+  });
+
+  await test("explicit port preserved in origin/apiBase", async () => {
+    const h = GhnHost.deriveHost("https://ghe.example.com:8443");
+    assert.strictEqual(h.origin, "https://ghe.example.com:8443");
+    assert.strictEqual(h.hostname, "ghe.example.com");
+    assert.strictEqual(h.apiBase, "https://ghe.example.com:8443/api/v3");
+  });
+
+  await test("invalid input throws", async () => {
+    assert.throws(() => GhnHost.deriveHost("not a url"));
+    assert.throws(() => GhnHost.deriveHost(""));
+    assert.throws(() => GhnHost.deriveHost(null));
+  });
+
+  // -------------- normalizeHostInput --------------
+  console.log("\n  lib/host.js — normalizeHostInput");
+
+  await test("bare hostname gets https:// prefix", async () => {
+    const r = GhnHost.normalizeHostInput("ghe.example.com");
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.origin, "https://ghe.example.com");
+    assert.strictEqual(r.kind, "ghes");
+  });
+
+  await test("trailing slash stripped", async () => {
+    const r = GhnHost.normalizeHostInput("https://ghe.example.com/");
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.origin, "https://ghe.example.com");
+  });
+
+  await test("deep link reduced to origin", async () => {
+    const r = GhnHost.normalizeHostInput("https://ghe.example.com/foo/bar/commit/abc123");
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.origin, "https://ghe.example.com");
+  });
+
+  await test("http:// rejected", async () => {
+    const r = GhnHost.normalizeHostInput("http://x.com");
+    assert.strictEqual(r.ok, false);
+    assert.ok(/https/i.test(r.error));
+  });
+
+  await test("github.com rejected as always-enabled", async () => {
+    const r = GhnHost.normalizeHostInput("github.com");
+    assert.strictEqual(r.ok, false);
+    assert.ok(/always/i.test(r.error));
+  });
+
+  await test("api.HOST rejected with suggestion of web hostname", async () => {
+    const r = GhnHost.normalizeHostInput("api.ghe.example.com");
+    assert.strictEqual(r.ok, false);
+    assert.ok(/ghe\.example\.com/.test(r.error));
+  });
+
+  await test("single-label host localhost rejected", async () => {
+    const r = GhnHost.normalizeHostInput("localhost");
+    assert.strictEqual(r.ok, false);
+  });
+
+  await test("empty input rejected", async () => {
+    const r = GhnHost.normalizeHostInput("");
+    assert.strictEqual(r.ok, false);
+    const r2 = GhnHost.normalizeHostInput("   ");
+    assert.strictEqual(r2.ok, false);
+  });
+
+  // -------------- parseCommitPath --------------
+  console.log("\n  lib/host.js — parseCommitPath");
+
+  await test("7-char SHA parses", async () => {
+    const r = GhnHost.parseCommitPath("/owner/repo/commit/abc1234");
+    assert.deepStrictEqual(r, { owner: "owner", repo: "repo", commitSha: "abc1234" });
+  });
+
+  await test("40-char SHA parses", async () => {
+    const sha = "abcdef0123456789abcdef0123456789abcdef01";
+    const r = GhnHost.parseCommitPath(`/o/r/commit/${sha}`);
+    assert.deepStrictEqual(r, { owner: "o", repo: "r", commitSha: sha });
+  });
+
+  await test("repo literally named 'commit' parses", async () => {
+    const r = GhnHost.parseCommitPath("/owner/commit/commit/abc1234");
+    assert.deepStrictEqual(r, { owner: "owner", repo: "commit", commitSha: "abc1234" });
+  });
+
+  await test("non-commit tree path is null", async () => {
+    assert.strictEqual(GhnHost.parseCommitPath("/o/r/tree/main"), null);
+  });
+
+  await test("PR path is null", async () => {
+    assert.strictEqual(GhnHost.parseCommitPath("/o/r/pull/42"), null);
+  });
+
+  // -------------- buildNoteContentCandidates (regression net) --------------
+  console.log("\n  lib/host.js — buildNoteContentCandidates");
+
+  await test("dotcom, no token => 1 candidate (raw, anon)", async () => {
+    const h = GhnHost.deriveHost("https://github.com");
+    const cs = GhnHost.buildNoteContentCandidates(h, "o", "r", "refs/notes/commits", "abc", { hasToken: false });
+    assert.strictEqual(cs.length, 1);
+    assert.strictEqual(cs[0].url, "https://raw.githubusercontent.com/o/r/notes/commits/abc");
+    assert.strictEqual(cs[0].auth, "none");
+    assert.strictEqual(cs[0].credentials, "omit");
+  });
+
+  await test("dotcom, with token => 3 candidates: raw anon, raw+token, contents API+token", async () => {
+    const h = GhnHost.deriveHost("https://github.com");
+    const cs = GhnHost.buildNoteContentCandidates(h, "o", "r", "refs/notes/commits", "abc", { hasToken: true });
+    assert.strictEqual(cs.length, 3);
+    assert.strictEqual(cs[0].url, "https://raw.githubusercontent.com/o/r/notes/commits/abc");
+    assert.strictEqual(cs[0].auth, "none");
+    assert.strictEqual(cs[1].url, "https://raw.githubusercontent.com/o/r/notes/commits/abc");
+    assert.strictEqual(cs[1].auth, "token");
+    assert.ok(cs[2].url.startsWith("https://api.github.com/repos/o/r/contents/abc?ref="));
+    assert.strictEqual(cs[2].auth, "token");
+  });
+
+  await test("ghes, no token => 2 candidates, same-origin, no token", async () => {
+    const h = GhnHost.deriveHost("https://ghe.example.com");
+    const cs = GhnHost.buildNoteContentCandidates(h, "o", "r", "refs/notes/commits", "abc", { hasToken: false });
+    assert.strictEqual(cs.length, 2);
+    assert.strictEqual(cs[0].url, "https://ghe.example.com/o/r/raw/notes/commits/abc");
+    assert.strictEqual(cs[0].credentials, "same-origin");
+    assert.strictEqual(cs[0].auth, "none");
+    assert.ok(cs[1].url.startsWith("https://ghe.example.com/api/v3/repos/o/r/contents/abc?ref="));
+    assert.strictEqual(cs[1].credentials, "same-origin");
+    assert.strictEqual(cs[1].auth, "none");
+  });
+
+  await test("ghes, with token => 3 candidates, third is contents API + token", async () => {
+    const h = GhnHost.deriveHost("https://ghe.example.com");
+    const cs = GhnHost.buildNoteContentCandidates(h, "o", "r", "refs/notes/commits", "abc", { hasToken: true });
+    assert.strictEqual(cs.length, 3);
+    assert.strictEqual(cs[2].auth, "token");
+    assert.ok(cs[2].url.startsWith("https://ghe.example.com/api/v3/repos/o/r/contents/abc"));
+  });
+
+  await test("no ghes candidate ever leaks api.github.com or raw.githubusercontent.com", async () => {
+    const h = GhnHost.deriveHost("https://ghe.example.com");
+    for (const hasToken of [false, true]) {
+      const cs = GhnHost.buildNoteContentCandidates(h, "o", "r", "refs/notes/commits", "abc", { hasToken });
+      for (const c of cs) {
+        assert.ok(
+          !c.url.includes("api.github.com"),
+          `ghes candidate leaked api.github.com: ${c.url}`
+        );
+        assert.ok(
+          !c.url.includes("raw.githubusercontent.com"),
+          `ghes candidate leaked raw.githubusercontent.com: ${c.url}`
+        );
+      }
+    }
+  });
+
+  // -------------- apiHeaders --------------
+  console.log("\n  lib/host.js — apiHeaders");
+
+  await test("dotcom includes X-GitHub-Api-Version", async () => {
+    const h = GhnHost.deriveHost("https://github.com");
+    const headers = GhnHost.apiHeaders(h, null);
+    assert.strictEqual(headers["X-GitHub-Api-Version"], "2022-11-28");
+    assert.strictEqual(headers.Authorization, undefined);
+  });
+
+  await test("ghes omits X-GitHub-Api-Version", async () => {
+    const h = GhnHost.deriveHost("https://ghe.example.com");
+    const headers = GhnHost.apiHeaders(h, null);
+    assert.strictEqual(headers["X-GitHub-Api-Version"], undefined);
+  });
+
+  await test("Authorization only when token supplied", async () => {
+    const hDot = GhnHost.deriveHost("https://github.com");
+    const hGhes = GhnHost.deriveHost("https://ghe.example.com");
+    assert.strictEqual(GhnHost.apiHeaders(hDot, "ghp_t").Authorization, "Bearer ghp_t");
+    assert.strictEqual(GhnHost.apiHeaders(hGhes, "ghp_t").Authorization, "Bearer ghp_t");
+    assert.strictEqual(GhnHost.apiHeaders(hDot, null).Authorization, undefined);
+    assert.strictEqual(GhnHost.apiHeaders(hGhes, null).Authorization, undefined);
+  });
+
+  // -------------- refToBranchPath --------------
+  console.log("\n  lib/host.js — refToBranchPath");
+
+  await test("refs/notes/commits => notes/commits", async () => {
+    assert.strictEqual(GhnHost.refToBranchPath("refs/notes/commits"), "notes/commits");
+  });
+
+  // -------------- tokenCreateUrl --------------
+  console.log("\n  lib/host.js — tokenCreateUrl");
+
+  await test("dotcom => github.com fine-grained token URL", async () => {
+    const h = GhnHost.deriveHost("https://github.com");
+    assert.strictEqual(
+      GhnHost.tokenCreateUrl(h),
+      "https://github.com/settings/personal-access-tokens/new"
+    );
+  });
+
+  await test("ghes => ${origin}/settings/tokens/new...", async () => {
+    const h = GhnHost.deriveHost("https://ghe.example.com");
+    const url = GhnHost.tokenCreateUrl(h);
+    assert.ok(url.startsWith("https://ghe.example.com/settings/tokens/new"));
+    assert.ok(url.includes("scopes=repo"));
+  });
+
+  // -------------- storage migration --------------
+  console.log("\n  lib/storage.js — migration & schema");
+
+  await test("v1 { githubToken, noteRefs } => v2 tokens[dotcom], githubToken removed", async () => {
+    const backing = installMockStorage({
+      githubToken: "ghp_old",
+      noteRefs: ["refs/notes/x"],
+    });
+    const store = await GhnStorage.getStore();
+    assert.strictEqual(store.schemaVersion, 2);
+    assert.strictEqual(store.tokens["https://github.com"], "ghp_old");
+    assert.deepStrictEqual(store.noteRefs, ["refs/notes/x"]);
+    // Backing store must no longer contain the legacy key.
+    assert.strictEqual(backing.githubToken, undefined);
+    assert.strictEqual(backing.schemaVersion, 2);
+  });
+
+  await test("getStore() is idempotent on already-migrated data", async () => {
+    installMockStorage({
+      githubToken: "ghp_old",
+      noteRefs: ["refs/notes/x"],
+    });
+    const first = await GhnStorage.getStore();
+    const second = await GhnStorage.getStore();
+    assert.strictEqual(second.schemaVersion, 2);
+    assert.strictEqual(second.tokens["https://github.com"], first.tokens["https://github.com"]);
+    // Third call should also be fine.
+    await GhnStorage.getStore();
+  });
+
+  // -------------- token isolation across hosts --------------
+  console.log("\n  lib/storage.js — token isolation");
+
+  await test("setToken on GHES does not leak to github.com", async () => {
+    installMockStorage();
+    await GhnStorage.setToken("https://ghe.example.com", "t1");
+    const dotcomTok = await GhnStorage.getToken("https://github.com");
+    assert.strictEqual(dotcomTok, null);
+    const gheTok = await GhnStorage.getToken("https://ghe.example.com");
+    assert.strictEqual(gheTok, "t1");
+  });
+
+  await test("setToken on github.com does not appear on GHES", async () => {
+    installMockStorage();
+    await GhnStorage.setToken("https://github.com", "d1");
+    assert.strictEqual(await GhnStorage.getToken("https://ghe.example.com"), null);
+    assert.strictEqual(await GhnStorage.getToken("https://github.com"), "d1");
+  });
+
+  // -------------- listHosts / removeHost --------------
+  console.log("\n  lib/storage.js — listHosts / removeHost");
+
+  await test("github.com is always present and not removable", async () => {
+    installMockStorage();
+    const hosts = await GhnStorage.listHosts();
+    const dot = hosts.find((h) => h.origin === "https://github.com");
+    assert.ok(dot, "github.com must be listed");
+    assert.strictEqual(dot.removable, false);
+  });
+
+  await test("added GHES host is removable", async () => {
+    installMockStorage();
+    await GhnStorage.addHost("https://ghe.example.com");
+    const hosts = await GhnStorage.listHosts();
+    const ghes = hosts.find((h) => h.origin === "https://ghe.example.com");
+    assert.ok(ghes, "GHES host must appear in listHosts");
+    assert.strictEqual(ghes.removable, true);
+    assert.strictEqual(ghes.kind, "ghes");
+  });
+
+  await test("removeHost('https://github.com') throws", async () => {
+    installMockStorage();
+    await assert.rejects(() => GhnStorage.removeHost("https://github.com"));
+  });
+
+  // -------------- capability TTL --------------
+  console.log("\n  lib/storage.js — capabilities TTL");
+
+  await test("capability returns null past CAPABILITY_TTL", async () => {
+    const stale = Date.now() - (GhnStorage.CAPABILITY_TTL + 1000);
+    installMockStorage({
+      schemaVersion: 2,
+      hosts: { "https://ghe.example.com": { kind: "ghes", addedAt: 0 } },
+      tokens: {},
+      noteRefs: [],
+      capabilities: {
+        "https://ghe.example.com": { treeJson: true, ts: stale },
+      },
+    });
+    const cap = await GhnStorage.getCapabilities("https://ghe.example.com");
+    assert.strictEqual(cap, null);
+  });
+
+  await test("capability returns entry when fresh", async () => {
+    installMockStorage({
+      schemaVersion: 2,
+      hosts: { "https://ghe.example.com": { kind: "ghes", addedAt: 0 } },
+      tokens: {},
+      noteRefs: [],
+      capabilities: {
+        "https://ghe.example.com": { treeJson: true, ts: Date.now() },
+      },
+    });
+    const cap = await GhnStorage.getCapabilities("https://ghe.example.com");
+    assert.ok(cap);
+    assert.strictEqual(cap.treeJson, true);
   });
 
   // --- Summary ---
